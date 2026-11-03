@@ -34,6 +34,7 @@ mod nr_overlay;
 #[cfg(target_os = "windows")]
 mod shell_context_menu;
 mod sunshine;
+mod version_compare;
 mod system;
 mod text_encoding;
 #[cfg(target_os = "windows")]
