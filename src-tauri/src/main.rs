@@ -3,6 +3,7 @@
 
 mod app;
 mod bat_runner;
+mod build_identity;
 mod client_fingerprint_rules;
 mod clipboard;
 mod commands;
@@ -19,6 +20,7 @@ mod file_transfer;
 mod fs_utils;
 mod game_session;
 mod github_download;
+mod host_version;
 mod hwinfo;
 mod logger;
 mod moonlight_web;
