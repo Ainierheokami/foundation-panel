@@ -18,8 +18,11 @@ mod elevation;
 mod file_mapping;
 mod file_transfer;
 mod fs_utils;
+mod gui_agent_exit;
 mod game_session;
 mod github_download;
+mod host_facts;
+mod host_facts_math;
 mod host_version;
 mod hwinfo;
 mod logger;
@@ -37,6 +40,7 @@ mod native_components;
 mod nr_overlay;
 #[cfg(target_os = "windows")]
 mod shell_context_menu;
+mod stall_watch;
 mod sunshine;
 mod version_compare;
 mod system;
@@ -182,6 +186,7 @@ fn main() {
             // 初始化日志系统（需要在 setup 中获取 app handle）
             logger::init_logger(app.handle().clone());
             client_fingerprint_rules::start();
+            stall_watch::start(app.handle().clone());
             info!("🚀 Sunshine Control Panel 启动中...");
 
             app::setup_application(app)
@@ -235,6 +240,7 @@ fn main() {
             system::get_system_info,
             system::get_process_memory_info,
             system::get_sunshine_start_time,
+            host_facts::get_sunshine_host_facts,
             sunshine::get_sunshine_install_path,
             sunshine::get_sunshine_version,
             sunshine::parse_sunshine_config,
