@@ -35,6 +35,7 @@ mod nr_overlay;
 mod shell_context_menu;
 mod sunshine;
 mod system;
+mod text_encoding;
 #[cfg(target_os = "windows")]
 mod text_context;
 mod toolbar;
