@@ -166,6 +166,9 @@ pub async fn restart_as_admin(app_handle: tauri::AppHandle) -> Result<String, St
 
         tokio::spawn(async move {
             info!("Exiting current GUI instance");
+            // Exit 0, not the deliberate-quit code. The elevated process is
+            // already running and waits for this one, so the host attaches to
+            // it instead of launching a third copy.
             app_handle.exit(0);
         });
 
@@ -316,6 +319,113 @@ pub async fn open_external_url(url: String) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Open the Windows Device Manager (devmgmt.msc) in this session, to enable a disabled device such as VB-CABLE. The target is
+/// fixed and the command takes no argument, so the Web UI in the frame may call it; it never enables or changes a device itself.
+#[tauri::command]
+pub fn open_device_manager() -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use ::windows::Win32::Foundation::HWND;
+        use ::windows::Win32::UI::Shell::ShellExecuteW;
+        use ::windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        use ::windows::core::PCWSTR;
+
+        fn to_wide(value: &str) -> Vec<u16> {
+            value.encode_utf16().chain(std::iter::once(0)).collect()
+        }
+
+        let operation = to_wide("open");
+        let target = to_wide("devmgmt.msc");
+        let result = unsafe {
+            ShellExecuteW(
+                Some(HWND(std::ptr::null_mut())),
+                PCWSTR(operation.as_ptr()),
+                PCWSTR(target.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        let code = result.0 as isize;
+        if code <= 32 {
+            return Err(format!(
+                "Failed to open the Device Manager: ShellExecuteW code {}",
+                code
+            ));
+        }
+        Ok(true)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("The Device Manager only exists on Windows".to_string())
+    }
+}
+
+/// Start the Sparxie program in this session. Sparxie is a window: it belongs to the person who is signed in, so
+/// the Control Panel (a process of that session) starts it and the host service never does. Only the bundled main
+/// window may call this (local-only command), and only a file named like Sparxie's own programs is started.
+#[tauri::command]
+pub fn open_sparxie(exe: String) -> Result<bool, String> {
+    let raw = exe.trim().trim_matches('"');
+    #[cfg(target_os = "windows")]
+    if raw.starts_with(r"\\") || raw.starts_with(r"\\?\") || raw.starts_with(r"\\.\") {
+        return Err("Network and device paths are not allowed".to_string());
+    }
+    let path = std::path::PathBuf::from(raw)
+        .canonicalize()
+        .map_err(|error| format!("Unable to resolve Sparxie: {error}"))?;
+    if !path.is_file() {
+        return Err("Sparxie is not installed at that path".to_string());
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if name != "sparxie.exe" && name != "sparxie.launcher.exe" {
+        return Err("That file is not the Sparxie program".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use ::windows::Win32::Foundation::HWND;
+        use ::windows::Win32::UI::Shell::ShellExecuteW;
+        use ::windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        use ::windows::core::PCWSTR;
+
+        fn to_wide(value: &std::ffi::OsStr) -> Vec<u16> {
+            use std::os::windows::ffi::OsStrExt;
+            value.encode_wide().chain(std::iter::once(0)).collect()
+        }
+
+        // Like opening it from Explorer: a program that asks for administrator rights shows the person's own prompt.
+        let operation = to_wide(std::ffi::OsStr::new("open"));
+        let file = to_wide(path.as_os_str());
+        let directory = path.parent().map(|dir| to_wide(dir.as_os_str()));
+        let result = unsafe {
+            ShellExecuteW(
+                Some(HWND(std::ptr::null_mut())),
+                PCWSTR(operation.as_ptr()),
+                PCWSTR(file.as_ptr()),
+                PCWSTR::null(),
+                directory
+                    .as_ref()
+                    .map_or(PCWSTR::null(), |dir| PCWSTR(dir.as_ptr())),
+                SW_SHOWNORMAL,
+            )
+        };
+        let code = result.0 as isize;
+        if code <= 32 {
+            return Err(format!("Sparxie did not start: ShellExecuteW code {code}"));
+        }
+        Ok(true)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Sparxie only runs on Windows".to_string())
+    }
+}
+
 /// Open a configured application's existing local working directory.
 #[tauri::command]
 pub fn open_local_path(path: String, app_name: String) -> Result<bool, String> {
@@ -380,26 +490,4 @@ pub fn open_local_path(path: String, app_name: String) -> Result<bool, String> {
             .map_err(|error| error.to_string())?;
     }
     Ok(true)
-}
-
-/// Execute an elevated PowerShell command.
-#[cfg(target_os = "windows")]
-pub fn execute_powershell_command(command: &str, error_context: &str) -> Result<(), String> {
-    // 直接以 runas 启动 PowerShell（fire-and-forget：在后台线程等待 UAC，
-    // 不阻塞 async 调用方）。命令原样传递——调用方已自行用 PowerShell
-    // 单引号包好值。
-    let command = command.to_string();
-    let context = error_context.to_string();
-    std::thread::spawn(move || {
-        let program = crate::elevation::system_binary(r"WindowsPowerShell\v1.0\powershell.exe");
-        if let Err(error) = crate::elevation::launch_elevated(
-            program.as_os_str(),
-            &["-NoProfile", "-Command", &command],
-            windows::Win32::UI::WindowsAndMessaging::SW_HIDE.0,
-        ) {
-            error!("{}: {}", context, error);
-        }
-    });
-
-    Ok(())
 }
