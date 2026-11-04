@@ -4,6 +4,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
+use crate::host_version::{FileStamp, parse_version_output, replaced_since};
 use std::sync::{Mutex, RwLock};
 use url::Url;
 
@@ -22,33 +23,10 @@ pub struct SunshineConfig {
 // 缓存 Sunshine 路径，避免重复查找和记录日志
 static SUNSHINE_PATH_CACHE: LazyLock<Mutex<Option<PathBuf>>> = LazyLock::new(|| Mutex::new(None));
 static RUNTIME_SUNSHINE_URL: LazyLock<RwLock<Option<String>>> = LazyLock::new(|| RwLock::new(None));
-static HTTPS_CLIENT: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))
-});
-// Local tray reads bypass environment proxies and have a shorter deadline.
+// Local host requests carry the current credential. The client is rebuilt per
+// request so direct callers observe a host-side credential rotation.
 pub(crate) const TRAY_STATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-static TRAY_HTTPS_CLIENT: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .no_proxy()
-        .danger_accept_invalid_certs(true)
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(TRAY_STATE_TIMEOUT)
-        .build()
-        .map_err(|error| format!("Create tray status HTTP client failed: {error}"))
-});
 const MAX_CONFIG_SAVE_RESPONSE_BYTES: usize = 64 * 1024;
-static SSE_HTTPS_CLIENT: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("Create Sunshine event client failed: {}", e))
-});
 
 pub const TRAY_PROTOCOL_VERSION: u32 = 1;
 const CORE_COMPATIBILITY_CHECK_ARG: &str = "--check-core-compatibility";
@@ -221,53 +199,128 @@ pub fn assets_dir() -> PathBuf {
     get_sunshine_path().join("assets")
 }
 
+/// `sunshine.exe --version` starts the host program (60 ms); the version of an installed program stays the same while the panel runs.
+static SUNSHINE_VERSION: crate::probe_cache::ProbeCache<String> =
+    crate::probe_cache::ProbeCache::new("sunshine version", std::time::Duration::from_secs(600));
+
+/// The panel outlives an update or a reinstall of the host: when sunshine.exe on disk is another file than the one the answers were read from,
+/// the kept version and build identity are dropped (the panel showed the old version until it was restarted).
+static SUNSHINE_EXE_SEEN: Mutex<Option<FileStamp>> = Mutex::new(None);
+
+fn forget_probes_of_a_replaced_host() {
+    let now = FileStamp::of(&get_sunshine_path().join("sunshine.exe"));
+    let replaced = SUNSHINE_EXE_SEEN
+        .lock()
+        .map(|mut seen| replaced_since(&mut seen, now))
+        .unwrap_or(false);
+    if replaced {
+        SUNSHINE_VERSION.invalidate();
+        SUNSHINE_BUILD.invalidate();
+    }
+}
+
 #[tauri::command]
 pub async fn get_sunshine_version() -> Result<String, String> {
+    forget_probes_of_a_replaced_host();
+    SUNSHINE_VERSION
+        .get(|| async {
+            tokio::task::spawn_blocking(read_sunshine_version)
+                .await
+                .map_err(|e| e.to_string())?
+        })
+        .await
+}
+
+/// The build identity of sunshine.exe (crate::build_identity): the VERSIONINFO keys first (no process), then
+/// `sunshine.exe --version --json`; `None` for a host that predates both. Cached like the version.
+static SUNSHINE_BUILD: crate::probe_cache::ProbeCache<
+    Option<crate::build_identity::BuildIdentity>,
+> = crate::probe_cache::ProbeCache::new(
+    "sunshine build identity",
+    std::time::Duration::from_secs(600),
+);
+
+#[tauri::command]
+pub async fn get_sunshine_build_info()
+-> Result<Option<crate::build_identity::BuildIdentity>, String> {
+    forget_probes_of_a_replaced_host();
+    SUNSHINE_BUILD
+        .get(|| async {
+            tokio::task::spawn_blocking(read_sunshine_build_info)
+                .await
+                .map_err(|e| e.to_string())
+        })
+        .await
+}
+
+fn read_sunshine_build_info() -> Option<crate::build_identity::BuildIdentity> {
+    let install_dir = get_sunshine_path();
+    let sunshine_exe = install_dir.join("sunshine.exe");
+    if !sunshine_exe.exists() {
+        return None;
+    }
+    let has_uninstaller = std::fs::read_dir(&install_dir)
+        .map(|entries| {
+            entries.flatten().any(|entry| {
+                crate::build_identity::is_inno_uninstaller(&entry.file_name().to_string_lossy())
+            })
+        })
+        .unwrap_or(false);
+
+    #[cfg(target_os = "windows")]
+    if let Some(info) = crate::device_probe::file_version_strings(
+        &sunshine_exe,
+        &crate::build_identity::VERSIONINFO_KEYS,
+    )
+    .and_then(|strings| crate::build_identity::from_versioninfo(&strings, has_uninstaller))
+    {
+        return Some(info);
+    }
+    let _ = has_uninstaller;
+
+    let mut command = Command::new(&sunshine_exe);
+    command.args(["--version", "--json"]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let output = command.output().ok()?;
+    let (stdout, _) = crate::text_encoding::decode_output(&output);
+    crate::build_identity::from_version_json(&stdout)
+}
+
+fn read_sunshine_version() -> Result<String, String> {
     let sunshine_exe = get_sunshine_path().join("sunshine.exe");
 
     if !sunshine_exe.exists() {
         return Ok("Unknown".to_string());
     }
 
+    // The version resource of the executable says what `--version` prints (60 ms to start the program): no process is started for it.
     #[cfg(target_os = "windows")]
-    let output = {
+    if let Some(version) = crate::device_probe::file_version_string(&sunshine_exe)
+        .and_then(|text| crate::device_probe::plain_host_version(&text))
+    {
+        return Ok(version);
+    }
+
+    // `--version --json` is the build record (src/build_info.h): its `version` is PROJECT_VER whole, whatever follows the date (.杂鱼, a commit).
+    // A host that predates it ignores --json and prints "<name> version: <version>", read below.
+    let mut command = Command::new(sunshine_exe);
+    command.args(["--version", "--json"]);
+    #[cfg(target_os = "windows")]
+    {
         use std::os::windows::process::CommandExt;
-        Command::new(sunshine_exe)
-            .arg("--version")
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
-            .output()
-            .map_err(|e| e.to_string())?
-    };
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let output = command.output().map_err(|e| e.to_string())?;
 
-    #[cfg(not(target_os = "windows"))]
-    let output = Command::new(sunshine_exe)
-        .arg("--version")
-        .output()
-        .map_err(|e| e.to_string())?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{}{}", stdout, stderr);
-
-    // 按优先级匹配版本号模式
-    let patterns = [
-        r"v?(\d+\.\d+\.\d+\.杂鱼)",              // 完整版本号（含"杂鱼"）
-        r"(\d+\.\d+\.\d+\.杂鱼)",                // 不带 v 前缀
-        r"Sunshine\s+v?([\d.]+(?:\.杂鱼)?)",     // "Sunshine v..." 格式
-        r"version\s*:?\s*v?([\d.]+(?:\.杂鱼)?)", // "version: ..." 格式
-        r"v?(\d+\.\d+\.\d+(?:\.杂鱼)?)",         // 标准版本号
-        r"(\d+\.\d+(?:\.杂鱼)?)",                // 简化版本号
-    ];
-
-    for pattern_str in &patterns {
-        if let Ok(pattern) = regex::Regex::new(pattern_str)
-            && let Some(cap) = pattern.captures(&combined)
-            && let Some(version) = cap.get(1)
-        {
-            let version_str = version.as_str().to_string();
-            debug!("✅ 解析到版本号: {}", version_str);
-            return Ok(version_str);
-        }
+    // stdout only: the version line is there, and the other stream carries log text (GBK on a Chinese system) that is not a version.
+    let (stdout, _) = crate::text_encoding::decode_output(&output);
+    if let Some(version) = parse_version_output(&stdout) {
+        debug!("✅ 解析到版本号: {}", version);
+        return Ok(version);
     }
 
     Ok("Unknown".to_string())
@@ -382,7 +435,36 @@ async fn local_tray_endpoint(resource: &str) -> Result<String, String> {
 }
 
 pub async fn get_tray_events_url() -> Result<String, String> {
-    local_tray_endpoint("events").await
+    // launch_splash_ack=1: this Panel answers launch_splash_shown, so the host may hold an app start for it (a bounded moment)
+    local_tray_endpoint("events")
+        .await
+        .map(|url| format!("{url}?launch_splash_ack=1"))
+}
+
+/// Tells the host the launch splash is on the display with its first frame painted (tray action launch_splash_shown). The host starts the app on it.
+pub async fn post_launch_splash_shown(
+    launch_id: &str,
+    panel_ms: i64,
+    prepare_ms: i64,
+) -> Result<(), String> {
+    let action_url = local_tray_endpoint("action").await?;
+    let client = create_https_client()?;
+    let response = client
+        .post(&action_url)
+        .json(&serde_json::json!({
+            "action": "launch_splash_shown",
+            "launch_id": launch_id,
+            "panel_ms": panel_ms,
+            "prepare_ms": prepare_ms,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Post launch splash answer failed: {e}"))?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("Launch splash answer returned status {}", response.status()))
+    }
 }
 
 fn parse_url_to_base(url: &str) -> Option<String> {
@@ -518,6 +600,72 @@ pub struct TrayState {
     pub notification: TrayNotificationState,
     #[serde(default)]
     pub operation: TrayOperationState,
+    #[serde(default)]
+    pub launch: TrayLaunchState,
+}
+
+/// The launch splash the host asks for (`launch` in the tray state, capability `launch-splash-v1`). It is handled on its own path (launch_splash.rs), so two
+/// tray states that differ only here count as equal: a stage line must not rebuild the tray menu.
+fn launch_display_ready_default() -> bool {
+    true
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TrayLaunchState {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub app_id: String,
+    #[serde(default)]
+    pub app_name: String,
+    #[serde(default)]
+    pub art: String,
+    #[serde(default)]
+    pub stage: String,
+    #[serde(default)]
+    pub notice: String,
+    #[serde(default)]
+    pub display: String,
+    /// False from the host accepting the launch until the display the stream captures is set up: the window is readied and not shown. A host that predates the
+    /// field has no such phase (true).
+    #[serde(default = "launch_display_ready_default")]
+    pub display_ready: bool,
+    #[serde(default)]
+    pub pids: Vec<u32>,
+    #[serde(default)]
+    pub started_at_ms: i64,
+    #[serde(default)]
+    pub deadline_ms: i64,
+}
+
+impl Default for TrayLaunchState {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            active: false,
+            kind: String::new(),
+            app_id: String::new(),
+            app_name: String::new(),
+            art: String::new(),
+            stage: String::new(),
+            notice: String::new(),
+            display: String::new(),
+            display_ready: true,
+            pids: Vec::new(),
+            started_at_ms: 0,
+            deadline_ms: 0,
+        }
+    }
+}
+
+impl PartialEq for TrayLaunchState {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -574,6 +722,32 @@ mod tray_protocol_tests {
             capabilities: vec!["state-v1".to_string(), "actions-v1".to_string()],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn reads_the_launch_splash_state_and_does_not_count_it_when_comparing_states() {
+        let json = format!(
+            r#"{{"protocol_version":{TRAY_PROTOCOL_VERSION},"instance_id":"core","owner":"gui","capabilities":["state-v1","launch-splash-v1"],
+                "launch":{{"id":"1-1","active":true,"kind":"launch","app_id":"13","app_name":"原神","art":"C:/covers/a.jpg","stage":"preparing",
+                "notice":"direct","display":"\\\\.\\DISPLAY3","pids":[4,5],"started_at_ms":10,"deadline_ms":60010}}}}"#
+        );
+        let state = parse_tray_state_json(&json).unwrap();
+        assert_eq!(state.launch.id, "1-1");
+        assert!(state.launch.active);
+        assert_eq!(state.launch.app_name, "原神");
+        assert_eq!(state.launch.stage, "preparing");
+        assert_eq!(state.launch.pids, vec![4, 5]);
+        assert_eq!(state.launch.deadline_ms, 60010);
+        // a host without the field is a state with no launch
+        let old = parse_tray_state_json(&format!(r#"{{"protocol_version":{TRAY_PROTOCOL_VERSION},"instance_id":"core","owner":"gui","capabilities":["state-v1"]}}"#)).unwrap();
+        assert_eq!(old.launch.id, "");
+        assert!(!old.launch.active);
+        // only the launch differs: the tray menu is not rebuilt for it
+        let mut other = state.clone();
+        other.launch.stage = "waiting-window".to_string();
+        assert_eq!(state, other);
+        other.status = "streaming".to_string();
+        assert_ne!(state, other);
     }
 
     #[test]
@@ -830,6 +1004,7 @@ pub async fn post_tray_action(
 }
 
 pub async fn post_tray_restart_action() -> Result<Option<TrayActionResponse>, String> {
+    crate::host_facts::expect_stop(180_000);
     match post_tray_action_request("restart", None, None, None).await {
         Ok(response) => Ok(Some(response)),
         Err(error) => handle_restart_action_error(error),
@@ -916,9 +1091,11 @@ pub async fn get_tray_state() -> Result<TrayState, String> {
 }
 
 async fn request_tray_state(tray_state_url: &str) -> Result<TrayState, String> {
-    let client = TRAY_HTTPS_CLIENT.as_ref().map_err(Clone::clone)?;
+    let client = create_https_client()?;
+    // The shared client waits up to ten seconds (a starved host). The tray menu must not: a core that accepts and then stalls has three seconds, on the headers and on the body.
     let response = client
         .get(tray_state_url)
+        .timeout(TRAY_STATE_TIMEOUT)
         .send()
         .await
         .map_err(|e| format!("Request tray state failed: {}", e))?;
@@ -985,11 +1162,52 @@ pub async fn post_client_fingerprint_rules(
 }
 
 pub fn create_https_client() -> Result<reqwest::Client, String> {
-    HTTPS_CLIENT.as_ref().cloned().map_err(Clone::clone)
+    let token = read_local_auth_token()?;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "X-Sunshine-Local-Token",
+        reqwest::header::HeaderValue::from_str(&token)
+            .map_err(|error| format!("Invalid local host credential: {error}"))?,
+    );
+    reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        // a loopback connect is accepted or refused at once; this long only a starved host (a VM that has just started) is waited for, where 500 ms made it a failed call
+        .connect_timeout(std::time::Duration::from_millis(3000))
+        .read_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(10))
+        .default_headers(headers)
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))
 }
 
 pub fn create_sse_https_client() -> Result<reqwest::Client, String> {
-    SSE_HTTPS_CLIENT.as_ref().cloned().map_err(Clone::clone)
+    let token = read_local_auth_token()?;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "X-Sunshine-Local-Token",
+        reqwest::header::HeaderValue::from_str(&token)
+            .map_err(|error| format!("Invalid local host credential: {error}"))?,
+    );
+    reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .default_headers(headers)
+        .build()
+        .map_err(|e| format!("Create Sunshine event client failed: {}", e))
+}
+
+fn read_local_auth_token() -> Result<String, String> {
+    // Read at client construction time so direct host callers follow a token
+    // rotation without keeping the previous value in a process-wide client
+    // [panel-rust-read-to-string] [panel-reqwest-request-builder].
+    let token = std::fs::read_to_string(config_dir().join("local-auth.token"))
+        .map_err(|_| "Local host credential is unavailable".to_string())?;
+    let token = token.trim();
+    if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Local host credential is invalid".to_string());
+    }
+    Ok(token.to_string())
 }
 
 fn validate_config_save_response(body: &str) -> Result<(), String> {
@@ -1021,6 +1239,13 @@ fn validate_config_save_response(body: &str) -> Result<(), String> {
 pub async fn post_sunshine_config(
     config_data: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), String> {
+    post_sunshine_config_reporting(config_data).await.map(|_| ())
+}
+
+/// The same, and the host's answer: a host that applies a saved value at once says so in it (`max_bitrate_in_force`, `sessions_updated`), which the tray's bitrate slider reads back.
+pub async fn post_sunshine_config_reporting(
+    config_data: &serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Value, String> {
     let sunshine_url = get_sunshine_url()
         .await
         .map_err(|e| format!("Cannot get Sunshine URL: {}", e))?;
@@ -1030,7 +1255,7 @@ pub async fn post_sunshine_config(
 async fn post_sunshine_config_to(
     sunshine_url: &str,
     config_data: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(), String> {
+) -> Result<serde_json::Value, String> {
     let config_url = format!("{}/api/config", sunshine_url.trim_end_matches('/'));
 
     let client = create_https_client()?;
@@ -1072,7 +1297,8 @@ async fn post_sunshine_config_to(
             status, response_body
         ));
     }
-    validate_config_save_response(&response_body)
+    validate_config_save_response(&response_body)?;
+    serde_json::from_str(&response_body).map_err(|error| format!("Sunshine Config API returned invalid JSON: {error}"))
 }
 
 #[tauri::command]
@@ -1296,45 +1522,10 @@ pub async fn change_bitrate(client_name: String, bitrate: u32) -> Result<String,
 }
 
 /// 检查 Sunshine 是否以用户模式运行（非服务模式）
-/// 内部实现：执行 sc / tasklist 等阻塞系统调用，必须在 spawn_blocking 中调用
+/// Reads the SCM and a process snapshot (sunshine_service), not `sc query` / `tasklist` text. Blocking: call
+/// it in spawn_blocking.
 pub(crate) fn is_sunshine_running_in_user_mode_impl() -> Result<bool, String> {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        use std::process::Command;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-        // 检查服务是否正在运行（服务名不区分大小写，只需检查一次）
-        if let Ok(result) = Command::new("sc")
-            .args(["query", "SunshineService"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-        {
-            let output_str = String::from_utf8_lossy(&result.stdout).to_uppercase();
-            if output_str.contains("RUNNING") {
-                return Ok(false); // 服务模式
-            }
-        }
-
-        // 服务未运行，检查 sunshine.exe 进程是否存在
-        if let Ok(result) = Command::new("tasklist")
-            .args(["/FI", "IMAGENAME eq sunshine.exe", "/FO", "CSV", "/NH"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-        {
-            let output_str = String::from_utf8_lossy(&result.stdout).to_lowercase();
-            if output_str.contains("sunshine.exe") {
-                return Ok(true); // 用户模式
-            }
-        }
-
-        Ok(false)
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Ok(false)
-    }
+    Ok(crate::sunshine_service::running_in_user_mode())
 }
 
 /// 检查 Sunshine 是否以用户模式运行（Tauri 命令，在后台线程执行阻塞逻辑，避免卡住 WebView）
@@ -1346,103 +1537,42 @@ pub async fn is_sunshine_running_in_user_mode() -> Result<bool, String> {
     }
 }
 
-/// 构建停止 Sunshine 的命令片段
-#[cfg(target_os = "windows")]
-fn build_stop_sunshine_command() -> String {
-    "net stop SunshineService 2>$null; \
-     net stop sunshineservice 2>$null; \
-     taskkill /IM sunshine.exe /F 2>$null; \
-     Start-Sleep -Seconds 1"
-        .to_string()
-}
-
-/// 构建启动服务模式的命令片段
-#[cfg(target_os = "windows")]
-fn build_start_service_command(sunshine_path: &std::path::Path) -> String {
-    format!(
-        "$serviceExists = Get-Service -Name 'SunshineService' -ErrorAction SilentlyContinue; \
-         if ($serviceExists) {{ \
-             net start SunshineService \
-         }} else {{ \
-             Set-Location '{}'; \
-             Start-Process -FilePath '.\\sunshine.exe' -WindowStyle Hidden \
-         }}",
-        sunshine_path.display()
-    )
-}
-
-/// 切换 Sunshine 运行模式（用户模式 ↔ 服务模式）
+/// 切换 Sunshine 运行模式（用户模式 ↔ 服务模式）through the hardened elevated helper (sunshine_service): no
+/// PowerShell, no `net stop` / `taskkill`. With live streams `acknowledge_live_stream` must be true
+/// (SVC-CONFIRM-002); the callers ask first.
 #[tauri::command]
-pub async fn toggle_sunshine_mode() -> Result<String, String> {
-    #[cfg(target_os = "windows")]
-    {
-        let is_user_mode = tokio::task::spawn_blocking(is_sunshine_running_in_user_mode_impl)
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .unwrap_or(false);
-        let sunshine_path = get_sunshine_path();
-        let sunshine_exe = sunshine_path.join("sunshine.exe");
-
-        if !sunshine_exe.exists() {
-            return Err(format!("找不到 sunshine.exe: {}", sunshine_exe.display()));
-        }
-
-        let stop_cmd = build_stop_sunshine_command();
-
-        let (mode_name, command) = if is_user_mode {
-            info!("🔄 切换 Sunshine 模式：用户模式 → 服务模式");
-            let start_cmd = build_start_service_command(&sunshine_path);
-            ("服务模式", format!("{}; {}", stop_cmd, start_cmd))
-        } else {
-            info!("🔄 切换 Sunshine 模式：服务模式 → 用户模式");
-            let start_cmd = format!(
-                "Set-Location '{}'; Start-Process -FilePath '.\\sunshine.exe' -Verb RunAs -WindowStyle Hidden",
-                sunshine_path.display()
-            );
-            ("用户模式", format!("{}; {}", stop_cmd, start_cmd))
-        };
-
-        crate::utils::execute_powershell_command(&command, &format!("切换到{}失败", mode_name))?;
-
-        info!("✅ 切换到{}命令已启动，正在后台执行...", mode_name);
-        Ok(format!("正在切换到{}", mode_name))
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Err("此功能仅支持 Windows".to_string())
-    }
+pub async fn toggle_sunshine_mode(acknowledge_live_stream: Option<bool>) -> Result<String, String> {
+    crate::host_facts::expect_stop(180_000);
+    let mode =
+        crate::sunshine_service::toggle_host_mode(acknowledge_live_stream.unwrap_or(false)).await?;
+    let mode_name = if mode == "user" {
+        "用户模式"
+    } else {
+        "服务模式"
+    };
+    info!("✅ 已切换到{}", mode_name);
+    Ok(format!("已切换到{}", mode_name))
 }
 
+/// 重启 Sunshine through the hardened elevated helper (or, without the service, as the current user); see
+/// sunshine_service::restart_host.
 #[tauri::command]
-pub async fn restart_sunshine_service() -> Result<String, String> {
-    #[cfg(target_os = "windows")]
-    {
-        info!("🔄 开始重启 Sunshine 服务...");
-
-        let sunshine_path = get_sunshine_path();
-        let stop_cmd = build_stop_sunshine_command();
-        let start_cmd = build_start_service_command(&sunshine_path);
-        let command = format!("{}; {}", stop_cmd, start_cmd);
-
-        crate::utils::execute_powershell_command(&command, "启动重启命令失败")?;
-
-        info!("✅ 重启命令已启动，正在后台执行...");
-        Ok("success".to_string())
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Err("此功能仅支持 Windows".to_string())
-    }
+pub async fn restart_sunshine_service(
+    acknowledge_live_stream: Option<bool>,
+) -> Result<String, String> {
+    // the stop that follows is asked for: the panel must not call it a crash
+    crate::host_facts::expect_stop(180_000);
+    info!("🔄 开始重启 Sunshine 服务...");
+    crate::sunshine_service::restart_host(acknowledge_live_stream.unwrap_or(false)).await
 }
 
 /// 以用户模式重启 Sunshine（非服务模式，但需要管理员权限）
 /// @deprecated 使用 sunshine::toggle_sunshine_mode 代替
 #[tauri::command]
-pub async fn restart_sunshine_in_user_mode() -> Result<String, String> {
-    toggle_sunshine_mode().await
+pub async fn restart_sunshine_in_user_mode(
+    acknowledge_live_stream: Option<bool>,
+) -> Result<String, String> {
+    toggle_sunshine_mode(acknowledge_live_stream).await
 }
 
 /// 获取 Sunshine 配置中的 locale 设置（通过 API 获取实时值）
@@ -1496,4 +1626,39 @@ pub async fn set_sunshine_locale(locale: String) -> Result<String, String> {
         Ok("success".to_string())
     })
     .await
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod direct_read_tests {
+    use super::*;
+
+    /// Run on a machine with Sunshine installed: `cargo test --bin sunshine-gui -- --ignored direct_read_matches --nocapture`.
+    #[test]
+    #[ignore]
+    fn version_resource_direct_read_matches_the_version_flag() {
+        use std::os::windows::process::CommandExt;
+        let exe = get_sunshine_path().join("sunshine.exe");
+        let t = std::time::Instant::now();
+        let resource = crate::device_probe::file_version_string(&exe)
+            .and_then(|text| crate::device_probe::plain_host_version(&text));
+        let resource_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let t = std::time::Instant::now();
+        let output = Command::new(&exe)
+            .arg("--version")
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap();
+        let (stdout, stderr) = crate::text_encoding::decode_output(&output);
+        println!(
+            "version: resource {resource_ms:.1} ms {resource:?}; --version {:.1} ms {:?}",
+            t.elapsed().as_secs_f64() * 1000.0,
+            format!("{stdout}{stderr}").trim()
+        );
+        let printed = format!("{stdout}{stderr}");
+        let resource = resource.expect("the version resource is the plain form");
+        assert!(
+            printed.contains(&resource),
+            "--version prints {printed:?}, the resource says {resource}"
+        );
+    }
 }

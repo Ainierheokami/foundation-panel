@@ -264,6 +264,7 @@ fn main() {
             host_facts::get_sunshine_host_facts,
             sunshine::get_sunshine_install_path,
             sunshine::get_sunshine_version,
+            sunshine::get_sunshine_build_info,
             sunshine::parse_sunshine_config,
             sunshine::get_sunshine_url,
             sunshine::get_command_line_url,
