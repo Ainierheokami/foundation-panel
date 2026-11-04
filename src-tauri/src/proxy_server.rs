@@ -9,10 +9,12 @@ use axum::{
 use bytes::Bytes;
 use futures_util::StreamExt;
 use log::{debug, error, info, warn};
-use std::sync::LazyLock;
+use std::fs;
 use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
@@ -43,17 +45,43 @@ static PROXY_PENDING_PERMITS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(MAX_PENDING_PROXY_REQUESTS)));
 static PROXY_HEALTH_TOKEN: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().to_string());
 
-/// 快速失败冷却时间（秒）- 在此时间内不重试，超过后会重新尝试连接
-const FAST_FAIL_COOLDOWN_SECS: u64 = 3;
+#[cfg(test)]
+static TEST_LOCAL_AUTH_TOKEN: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| {
+    Mutex::new(Some(
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+    ))
+});
 
-/// 默认代理超时：用于 Sunshine 普通页面/API，保持界面快速失败。
-const DEFAULT_PROXY_TIMEOUT_SECS: u64 = 5;
+/// Fast-fail cooldown (s) after the host REFUSED a connection (nothing listens). Only that proves the host is away: a slow or
+/// timed-out request proves nothing about the next one and never starts a cooldown (it used to, and the pairing long poll
+/// ended in a timeout every few seconds, so every page request of the frame got a 503 for 3 s each time).
+const FAST_FAIL_COOLDOWN_SECS: u64 = 1;
+
+/// Default proxy timeout for ordinary pages and API calls. The host is on this computer: a request that takes longer than this is
+/// a host that is busy (a VM that is starting, a stream in progress), and an error page for it is worse than waiting.
+const DEFAULT_PROXY_TIMEOUT_SECS: u64 = 15;
+
+/// Health and live-session snapshots can run encoder/session probes while the
+/// host is streaming. Give those bounded routes the time they need without
+/// weakening the failure budget of ordinary page requests.
+const SLOW_API_PROXY_TIMEOUT_SECS: u64 = 15;
+
+/// GET /api/doctor runs each group on the host with its own budget. The encoder group
+/// allows 90 s. The proxy must outlast that budget so the page receives the host's
+/// per-probe timeout instead of a transport failure, and must still end if the host
+/// never answers.
+const DOCTOR_PROXY_TIMEOUT_SECS: u64 = 100;
 
 /// AI 请求会携带日志、应用列表等上下文，模型首 token 可能明显慢于普通 API。
 const AI_PROXY_TIMEOUT_SECS: u64 = 120;
 
-/// 本机 Sunshine 连接应快速建立；连接超时不跟随 AI 响应超时放大。
-const PROXY_CONNECT_TIMEOUT_MS: u64 = 500;
+/// A listening loopback socket accepts at once and a missing one is refused at once, so this long a connect only costs time when the
+/// host is starved (a VM that has just started): 500 ms made such a connect a failed request.
+const PROXY_CONNECT_TIMEOUT_MS: u64 = 3000;
+
+/// The read timeout of the client that carries a long poll (the pairing wait is up to 60 s plus 5 s). The client's own read
+/// timeout, not the request's, ends a response that sends no bytes; the shared 5 s one ended every long poll after 5 s.
+const LONG_POLL_CLIENT_TIMEOUT_SECS: u64 = 70;
 
 /// Bound memory and active work exposed by the unauthenticated loopback proxy.
 const MAX_PROXY_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -121,6 +149,78 @@ pub fn get_proxy_health_check() -> ProxyHealthCheck {
         ),
         token: PROXY_HEALTH_TOKEN.as_str().to_owned(),
     }
+}
+
+/// One probe of the host behind the proxy, made by this process and not by the WebView. At a start the WebView's six connections to the proxy are taken by the pages' own first
+/// requests, and a probe queued behind them looks like a silent host (the 「主机无响应」 card on a host that answers in a few milliseconds). Returns the HTTP status.
+#[tauri::command]
+pub async fn probe_sunshine_host(timeout_ms: Option<u64>) -> Result<u16, String> {
+    let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(2500).clamp(500, 10_000));
+    wait_for_host(timeout).await
+}
+
+/// How long one answer of the host counts as "ready" for the callers that only need to know it is up (not the status).
+const HOST_READY_MEMO_MS: u64 = 4000;
+static HOST_READY_UNTIL_MS: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// THE host-readiness wait: asks the host for its Web UI until it answers (or `timeout` is over) and returns the HTTP status. Every consumer that contacts the host at the panel's start
+/// goes through it (host_ready below): the window's probe, the DLSS NR status, the clipboard and tray event streams. It tolerates what a host that has just started does for a moment:
+/// refuses the connection, has not published its credential yet, or has published it before it accepts it.
+pub(crate) async fn wait_for_host(timeout: std::time::Duration) -> Result<u16, String> {
+    let url = format!("{}/", get_sunshine_target().trim_end_matches('/'));
+    // The readiness handshake: this one call waits for the host to be ready, up to the timeout, and answers the moment it is. A host that has just started refuses
+    // the connection for a moment, and the credential it publishes (the file read for every request) is not there yet: both end within milliseconds, so the call asks again every 100 ms
+    // instead of failing and leaving the window to ask again a second or more later.
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now()).max(std::time::Duration::from_millis(300));
+        match send_local_authenticated_request(
+            get_http_client(),
+            &url,
+            &axum::http::Method::GET,
+            &axum::http::HeaderMap::new(),
+            &Bytes::new(),
+            Some(remaining),
+        )
+        .await
+        {
+            Ok(response) => {
+                // the host answers: keep its Web UI on this computer (once per address, in the background)
+                tauri::async_runtime::spawn(prewarm_assets());
+                mark_available();
+                HOST_READY_UNTIL_MS.store(now_ms() + HOST_READY_MEMO_MS, Ordering::Relaxed);
+                return Ok(response.status().as_u16());
+            }
+            Err(error) => {
+                let text = error_chain(&*error);
+                if std::time::Instant::now() + std::time::Duration::from_millis(100) >= deadline {
+                    return Err(text);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+/// True once the host answers, waiting up to `max` for it; a recent answer (4 s) is not asked for again. For the code that starts with the panel and needs the host: it waits here instead of
+/// failing at once and trying again at its own pace.
+pub async fn host_ready(max: std::time::Duration) -> bool {
+    if now_ms() < HOST_READY_UNTIL_MS.load(Ordering::Relaxed) {
+        return true;
+    }
+    wait_for_host(max).await.is_ok()
+}
+
+/// The host refused something that says it is not ready after all (a credential it has published and not yet accepts): the next `host_ready` asks again.
+pub fn host_not_ready() {
+    HOST_READY_UNTIL_MS.store(0, Ordering::Relaxed);
 }
 
 async fn proxy_health_handler(request: Request) -> Response {
@@ -204,8 +304,10 @@ pub fn ensure_started<R: Runtime>(app: &AppHandle<R>) {
 /// 设置 Sunshine 目标 URL
 pub fn set_sunshine_target(url: String) {
     if let Ok(mut target) = SUNSHINE_TARGET.write() {
-        info!("🎯 代理目标已更新: {}", url);
-        *target = url;
+        if *target != url {
+            info!("🎯 代理目标已更新: {}", url);
+            *target = url;
+        }
     }
 }
 
@@ -242,6 +344,7 @@ pub async fn refresh_sunshine_target() -> Result<String, String> {
 const INJECT_STYLES: &str = include_str!("../inject-styles.css");
 
 /// 注入的 JavaScript 脚本（编译时从文件读取）
+const INJECT_TRACES: &str = include_str!("../inject-traces.js");
 const INJECT_SCRIPT: &str = include_str!("../inject-script.js");
 
 /// 调皮的404页面（当Sunshine未启动时显示，编译时从文件读取）
@@ -583,6 +686,24 @@ fn is_connection_error(error: &str) -> bool {
         .any(|p| error_lower.contains(p))
 }
 
+/// The whole chain of an error (`reqwest::Error` shows only "error sending request for url" and keeps the reason, "operation timed out" or "connection refused", in its source).
+fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(inner) = source {
+        text.push_str(": ");
+        text.push_str(&inner.to_string());
+        source = inner.source();
+    }
+    text
+}
+
+/// The host is not listening (refused, no route, unreachable): the one failure that proves it is away.
+fn host_is_gone(error: &str) -> bool {
+    let error_lower = error.to_lowercase();
+    error_lower.contains("refused") || error_lower.contains("10061") || error_lower.contains("unreachable") || error_lower.contains("no route")
+}
+
 fn is_timeout_error(error: &str) -> bool {
     let error_lower = error.to_lowercase();
     error_lower.contains("timed out") || error_lower.contains("timeout")
@@ -757,7 +878,10 @@ fn connection_failure_response(
     if is_ai_api {
         ai_proxy_error_response(error_kind, error)
     } else {
-        mark_unavailable();
+        // only a host that refuses the connection is marked away; a timeout or a reset says nothing about the next request
+        if host_is_gone(error) {
+            mark_unavailable();
+        }
         service_unavailable_response(is_api)
     }
 }
@@ -853,6 +977,89 @@ fn streamed_response_body(
     }
 }
 
+/// How long a long poll of the Sunshine web UI may wait: the `wait` it asks for (seconds, at most 60) and five seconds more. The pairing list is polled as
+/// `/api/pairing/pending?wait=25&since=<generation>` and Sunshine holds the request until the list changes, so the plain 5 s limit of the proxy ended every
+/// poll as a failure, marked the service unavailable and refreshed the target again and again.
+fn long_poll_timeout(method: &axum::http::Method, url: &str) -> Option<std::time::Duration> {
+    if method != axum::http::Method::GET {
+        return None;
+    }
+    let url = url::Url::parse(url).ok()?;
+    if url.path() != "/api/pairing/pending" {
+        return None;
+    }
+    let wait = url
+        .query_pairs()
+        .find(|(key, _)| key == "wait")?
+        .1
+        .parse::<u64>()
+        .ok()?;
+    Some(std::time::Duration::from_secs(wait.min(60) + 5))
+}
+
+fn slow_api_timeout(method: &axum::http::Method, url: &str) -> Option<std::time::Duration> {
+    if method != axum::http::Method::GET {
+        return None;
+    }
+    let path = url::Url::parse(url).ok()?.path().to_string();
+    match path.as_str() {
+        "/api/doctor" => Some(std::time::Duration::from_secs(DOCTOR_PROXY_TIMEOUT_SECS)),
+        "/api/runtime/sessions" => Some(std::time::Duration::from_secs(SLOW_API_PROXY_TIMEOUT_SECS)),
+        _ => None,
+    }
+}
+
+const ERROR_LOG_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// `None` when a failure of the same kind on the same path was written less than a window ago (it is counted instead); otherwise the number of
+/// failures that were left out since the last line.
+fn throttle_log(
+    seen: &mut std::collections::HashMap<String, (std::time::Instant, u32)>,
+    key: &str,
+    now: std::time::Instant,
+) -> Option<u32> {
+    match seen.get_mut(key) {
+        Some((at, left_out)) if now.duration_since(*at) < ERROR_LOG_WINDOW => {
+            *left_out += 1;
+            None
+        }
+        Some((at, left_out)) => {
+            let n = *left_out;
+            *at = now;
+            *left_out = 0;
+            Some(n)
+        }
+        None => {
+            seen.insert(key.to_string(), (now, 0));
+            Some(0)
+        }
+    }
+}
+
+/// A failure of the proxy is written once a minute per path and kind, with the number of those left out; a page that polls does not fill the log.
+fn log_proxy_failure(path: &str, kind: &str, error: &str) {
+    use std::sync::{LazyLock, Mutex};
+    static SEEN: LazyLock<Mutex<std::collections::HashMap<String, (std::time::Instant, u32)>>> =
+        LazyLock::new(Default::default);
+    let decision = SEEN.lock().ok().and_then(|mut seen| {
+        throttle_log(
+            &mut seen,
+            &format!("{path}|{kind}"),
+            std::time::Instant::now(),
+        )
+    });
+    if let Some(left_out) = decision {
+        if left_out == 0 {
+            error!("❌ 代理错误 [{}] ({}): {}", path, kind, error);
+        } else {
+            error!(
+                "❌ 代理错误 [{}] ({}): {} (另有 {} 次同类错误未记录)",
+                path, kind, error, left_out
+            );
+        }
+    }
+}
+
 fn proxy_response_body_limit(
     url: &str,
     method: &axum::http::Method,
@@ -923,6 +1130,14 @@ async fn proxy_handler(req: Request) -> Response {
     let is_api = is_api_request(&path);
     let is_ai_api = is_ai_api_request(&path);
 
+    // a hashed asset the host already gave once is answered from here, whatever the host is doing now
+    let cacheable_asset = method == axum::http::Method::GET && is_hashed_asset(&path);
+    if cacheable_asset {
+        if let Some(response) = asset_cache_get(&path) {
+            return response;
+        }
+    }
+
     // 获取请求体
     let body = match read_proxy_request_body(req).await {
         Ok(bytes) => bytes,
@@ -943,6 +1158,11 @@ async fn proxy_handler(req: Request) -> Response {
         debug!("📡 代理请求: {} {}", method, path);
     }
 
+    // the Web UI's restart or quit button: the stop that follows is asked for, the panel must not call it a crash (host_facts.rs)
+    if crate::host_facts_math::is_stop_request(method.as_str(), &path) {
+        crate::host_facts::expect_stop(180_000);
+    }
+
     // 快速失败检查：在冷却时间内直接返回错误，避免大量无效请求。
     // AI 入口除外：它是用户显式触发的共享代理能力，需要真实尝试一次，
     // 否则会因为旧的全局不可用状态误报 "Sunshine service is unavailable"。
@@ -954,6 +1174,11 @@ async fn proxy_handler(req: Request) -> Response {
     match fetch_and_proxy(&target_url, &method, &headers, &body, is_ai_api).await {
         Ok(response) => {
             mark_available();
+            let response = if cacheable_asset && response.status() == axum::http::StatusCode::OK {
+                cache_asset_response(&path, response).await
+            } else {
+                response
+            };
             if method == axum::http::Method::POST
                 && path == "/api/restart"
                 && response.status().is_success()
@@ -975,9 +1200,18 @@ async fn proxy_handler(req: Request) -> Response {
             response
         }
         Err(e) => {
-            let error_str = e.to_string();
+            let error_str = error_chain(&*e);
             let error_kind = proxy_error_kind(&error_str);
-            error!("❌ 代理错误 [{}] ({}): {}", path, error_kind, error_str);
+            if long_poll_timeout(&method, &target_url).is_some() && is_timeout_error(&error_str) {
+                // Sunshine did not answer within the wait it was given: the page asks again; the service is not marked unavailable and the target is not refreshed
+                debug!("long poll [{}] ended without an answer", path);
+                return (
+                    axum::http::StatusCode::GATEWAY_TIMEOUT,
+                    "long poll timed out",
+                )
+                    .into_response();
+            }
+            log_proxy_failure(&path, error_kind, &error_str);
 
             if is_connection_error(&error_str) {
                 match refresh_sunshine_target_internal().await {
@@ -1074,7 +1308,7 @@ async fn handle_steam_api(
 
     // 发送请求并构建响应
     let client = get_http_client();
-    match send_request(client, &target_url, method, headers, &body).await {
+    match send_request(client, &target_url, method, headers, &body, None, None).await {
         Ok(response) => build_filtered_proxy_response(response).await,
         Err(e) => {
             error!("❌ Steam API 请求失败: {}", e);
@@ -1196,7 +1430,7 @@ async fn handle_external_proxy(
 
     // 发送请求
     let client = get_http_client();
-    match send_request(client, &target_url, method, headers, &body).await {
+    match send_request(client, &target_url, method, headers, &body, None, None).await {
         Ok(response) => build_filtered_proxy_response(response).await,
         Err(e) => {
             error!("❌ 外部代理请求失败: {}", e);
@@ -1216,6 +1450,29 @@ async fn handle_external_proxy(
     }
 }
 
+fn read_local_auth_token_from(path: &Path) -> Result<String, String> {
+    // The host publishes this file with an explicit Windows DACL or owner-only
+    // POSIX mode. Read it for each upstream request so a host restart rotates
+    // the credential without retaining an old value
+    // [panel-rust-read-to-string] [panel-reqwest-request-builder].
+    let token =
+        fs::read_to_string(path).map_err(|_| "Local host credential is unavailable".to_string())?;
+    let token = token.trim();
+    if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Local host credential is invalid".to_string());
+    }
+    Ok(token.to_string())
+}
+
+fn read_local_auth_token() -> Result<String, String> {
+    #[cfg(test)]
+    if let Some(token) = TEST_LOCAL_AUTH_TOKEN.lock().unwrap().clone() {
+        return Ok(token);
+    }
+
+    read_local_auth_token_from(&crate::sunshine::config_dir().join("local-auth.token"))
+}
+
 /// 创建共享的 HTTP 客户端（连接复用，性能优化）
 fn get_http_client() -> &'static reqwest::Client {
     use std::sync::OnceLock;
@@ -1228,6 +1485,26 @@ fn get_ai_http_client() -> &'static reqwest::Client {
     use std::sync::OnceLock;
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| build_http_client(AI_PROXY_TIMEOUT_SECS))
+}
+
+fn get_long_poll_http_client() -> &'static reqwest::Client {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| build_http_client(LONG_POLL_CLIENT_TIMEOUT_SECS))
+}
+
+fn get_slow_api_http_client() -> &'static reqwest::Client {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| build_http_client(SLOW_API_PROXY_TIMEOUT_SECS))
+}
+
+fn get_doctor_http_client() -> &'static reqwest::Client {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    // read_timeout is taken from the client, not from RequestBuilder::timeout.
+    // The doctor client therefore carries the 100 s budget on both.
+    CLIENT.get_or_init(|| build_http_client(DOCTOR_PROXY_TIMEOUT_SECS))
 }
 
 fn get_streaming_http_client() -> &'static reqwest::Client {
@@ -1247,10 +1524,15 @@ fn get_streaming_http_client() -> &'static reqwest::Client {
 }
 
 fn build_http_client(timeout_secs: u64) -> reqwest::Client {
+    // reqwest keeps the connect phase separate from the bounded request/read
+    // budget, so a busy local host can be given more response time without
+    // making a missing listener slow every ordinary request
+    // [panel-reqwest-client-builder].
     reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .pool_max_idle_per_host(20)
         .timeout(std::time::Duration::from_secs(timeout_secs))
+        .read_timeout(std::time::Duration::from_secs(timeout_secs))
         .connect_timeout(std::time::Duration::from_millis(PROXY_CONNECT_TIMEOUT_MS))
         .build()
         .expect("Failed to create HTTP client")
@@ -1263,6 +1545,8 @@ async fn send_request(
     method: &axum::http::Method,
     headers: &axum::http::HeaderMap,
     body: &Bytes,
+    timeout: Option<std::time::Duration>,
+    local_token: Option<&str>,
 ) -> Result<reqwest::Response, reqwest::Error> {
     let mut req_builder = match method.as_str() {
         "GET" => client.get(url),
@@ -1279,19 +1563,135 @@ async fn send_request(
         let key_str = key.as_str();
         if !matches!(
             key_str,
-            "host" | "connection" | "content-length" | "transfer-encoding"
+            "host"
+                | "connection"
+                | "content-length"
+                | "transfer-encoding"
+                | "x-sunshine-local-token"
         ) {
             if let Ok(value_str) = value.to_str() {
                 req_builder = req_builder.header(key_str, value_str);
             }
         }
     }
+    if let Some(token) = local_token {
+        req_builder = req_builder.header("X-Sunshine-Local-Token", token);
+    }
 
     if !body.is_empty() {
         req_builder = req_builder.body(body.clone());
     }
+    if let Some(timeout) = timeout {
+        req_builder = req_builder.timeout(timeout);
+    }
 
     req_builder.send().await
+}
+
+async fn send_local_authenticated_request(
+    client: &reqwest::Client,
+    url: &str,
+    method: &axum::http::Method,
+    headers: &axum::http::HeaderMap,
+    body: &Bytes,
+    timeout: Option<std::time::Duration>,
+) -> Result<reqwest::Response, Box<dyn std::error::Error + Send + Sync>> {
+    let token = read_local_auth_token().map_err(std::io::Error::other)?;
+    let response = send_request(client, url, method, headers, body, timeout, Some(&token)).await?;
+    if response.status() != reqwest::StatusCode::UNAUTHORIZED {
+        return Ok(response);
+    }
+
+    // The host rotates this credential when the active console user changes.
+    // Re-read once so an in-flight request does not strand the Panel on a
+    // stale value; a second 401 is returned to the normal error path.
+    let refreshed = read_local_auth_token().map_err(std::io::Error::other)?;
+    Ok(send_request(
+        client,
+        url,
+        method,
+        headers,
+        body,
+        timeout,
+        Some(&refreshed),
+    )
+    .await?)
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HostLaunchResult {
+    pub status: String,
+    pub app_id: Option<String>,
+    pub app_name: Option<String>,
+    pub pid: Option<String>,
+}
+
+pub(crate) async fn launch_host_app(app_id: i32) -> Result<HostLaunchResult, String> {
+    let body = Bytes::from(serde_json::json!({ "appId": app_id }).to_string());
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    let url = format!(
+        "{}/api/apps/launch",
+        get_sunshine_target().trim_end_matches('/')
+    );
+    let response = send_local_authenticated_request(
+        get_http_client(),
+        &url,
+        &axum::http::Method::POST,
+        &headers,
+        &body,
+        Some(std::time::Duration::from_secs(15)),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err("host-api-unavailable".to_string());
+    }
+    let status = response.status();
+    let payload = response.bytes().await.map_err(|error| error.to_string())?;
+    let result: HostLaunchResult = serde_json::from_slice(&payload)
+        .map_err(|error| format!("Invalid host launch response (HTTP {}): {}", status, error))?;
+    if !status.is_success() || result.status != "true" {
+        return Err(serde_json::from_slice::<serde_json::Value>(&payload)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("error")
+                    .and_then(|error| error.as_str())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| format!("Host rejected application launch (HTTP {})", status)));
+    }
+    Ok(result)
+}
+
+pub(crate) async fn close_host_app() -> Result<(), String> {
+    let url = format!(
+        "{}/api/apps/close",
+        get_sunshine_target().trim_end_matches('/')
+    );
+    let response = send_local_authenticated_request(
+        get_http_client(),
+        &url,
+        &axum::http::Method::POST,
+        &axum::http::HeaderMap::new(),
+        &Bytes::new(),
+        Some(std::time::Duration::from_secs(15)),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Host app close failed (HTTP {})",
+            response.status()
+        ))
+    }
 }
 
 /// 获取并代理内容
@@ -1303,21 +1703,47 @@ async fn fetch_and_proxy(
     is_ai_api: bool,
 ) -> Result<Response, Box<dyn std::error::Error + Send + Sync>> {
     let response_body_limit = proxy_response_body_limit(url, method, headers);
+    let slow_api = slow_api_timeout(method, url);
     let client = if response_body_limit.is_none() {
         get_streaming_http_client()
     } else if is_ai_api {
         get_ai_http_client()
+    } else if slow_api == Some(std::time::Duration::from_secs(DOCTOR_PROXY_TIMEOUT_SECS)) {
+        get_doctor_http_client()
+    } else if slow_api.is_some() {
+        get_slow_api_http_client()
+    } else if long_poll_timeout(method, url).is_some() {
+        get_long_poll_http_client()
     } else {
         get_http_client()
     };
 
     // 尝试请求，HTTPS 失败时降级到 HTTP（仅限非连接错误）
-    let response = match send_request(client, url, method, headers, body).await {
+    let long_poll = long_poll_timeout(method, url);
+    let upstream_timeout = long_poll.or(slow_api);
+    let response = match send_local_authenticated_request(
+        client,
+        url,
+        method,
+        headers,
+        body,
+        upstream_timeout,
+    )
+    .await
+    {
         Ok(resp) => resp,
         Err(e) if url.starts_with("https://") && !is_connection_error(&e.to_string()) => {
             let http_url = url.replace("https://", "http://");
             warn!("⚠️  HTTPS 连接失败，尝试 HTTP: {}", http_url);
-            send_request(client, &http_url, method, headers, body).await?
+            send_local_authenticated_request(
+                client,
+                &http_url,
+                method,
+                headers,
+                body,
+                upstream_timeout,
+            )
+            .await?
         }
         Err(e) => return Err(e.into()),
     };
@@ -1375,6 +1801,170 @@ async fn fetch_and_proxy(
     Ok(res.body(final_body)?)
 }
 
+
+// ---- hashed static assets of the Web UI ------------------------------------------------------------------------------------------
+// The Web UI is loaded from the host in pieces (a chunk per page and per tab). Each piece used to be fetched from the host every time, through
+// a request budget of its own, so a page was as slow and as fragile as the busiest moment of the host (a VM that has just started, a stream in
+// progress): the first entry of a page waited on, or failed with, a request to the host. A file whose name carries a content hash never changes:
+// it is kept in memory here, told to the WebView as immutable (the WebView keeps it on disk across starts), and the whole set is fetched once in the
+// background as soon as the host answers (`prewarm_assets`), so entering any page is served from this computer.
+const ASSET_CACHE_MAX_BYTES: usize = 96 * 1024 * 1024;
+const ASSET_CACHE_MAX_ONE_BYTES: usize = 12 * 1024 * 1024;
+const PREWARM_MAX_FILES: usize = 800;
+
+struct CachedAsset {
+    content_type: String,
+    body: Bytes,
+}
+
+#[derive(Default)]
+struct AssetCache {
+    files: std::collections::HashMap<String, CachedAsset>,
+    bytes: usize,
+}
+
+static ASSET_CACHE: LazyLock<Mutex<AssetCache>> = LazyLock::new(Default::default);
+static PREWARMED_TARGET: LazyLock<Mutex<String>> = LazyLock::new(Default::default);
+static ASSET_NAME: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"[A-Za-z0-9_.\-]+-[A-Za-z0-9_\-]{8}\.(?:js|css)").expect("asset name pattern"));
+static ASSET_PATH: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"/assets/[A-Za-z0-9_.\-/]+\.(?:js|css)").expect("asset path pattern"));
+
+/// `/assets/<name>-<8 characters of hash>.<ext>`: a file whose content decides its name.
+fn is_hashed_asset(path: &str) -> bool {
+    if !path.starts_with("/assets/") || path.contains("..") {
+        return false;
+    }
+    let file = path.rsplit('/').next().unwrap_or("");
+    let Some((stem, ext)) = file.rsplit_once('.') else {
+        return false;
+    };
+    if !matches!(ext, "js" | "css" | "woff2" | "woff" | "svg" | "png" | "webp" | "jpg" | "jpeg" | "gif") {
+        return false;
+    }
+    let hash = stem.rsplit('-').next().unwrap_or("");
+    stem.contains('-') && hash.len() >= 8 && hash.len() <= 12 && hash.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+fn asset_response(content_type: &str, body: Bytes) -> Response {
+    axum::http::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, content_type)
+        .header(axum::http::header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+        .body(Body::from(body))
+        .unwrap_or_else(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+fn asset_cache_get(path: &str) -> Option<Response> {
+    let cache = ASSET_CACHE.lock().ok()?;
+    let asset = cache.files.get(path)?;
+    Some(asset_response(&asset.content_type, asset.body.clone()))
+}
+
+fn asset_cache_put(path: &str, content_type: &str, body: Bytes) {
+    if body.len() > ASSET_CACHE_MAX_ONE_BYTES {
+        return;
+    }
+    if let Ok(mut cache) = ASSET_CACHE.lock() {
+        if cache.files.contains_key(path) {
+            return;
+        }
+        if cache.bytes + body.len() > ASSET_CACHE_MAX_BYTES {
+            cache.files.clear();
+            cache.bytes = 0;
+        }
+        cache.bytes += body.len();
+        cache.files.insert(path.to_string(), CachedAsset { content_type: content_type.to_string(), body });
+    }
+}
+
+/// A fetched hashed asset is kept, and answered with the immutable headers.
+async fn cache_asset_response(path: &str, response: Response) -> Response {
+    let (parts, body) = response.into_parts();
+    match axum::body::to_bytes(body, MAX_PROXY_RESPONSE_BODY_BYTES).await {
+        Ok(bytes) => {
+            let content_type = parts
+                .headers
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("application/octet-stream")
+                .to_string();
+            asset_cache_put(path, &content_type, bytes.clone());
+            asset_response(&content_type, bytes)
+        }
+        Err(error) => (axum::http::StatusCode::BAD_GATEWAY, format!("asset read failed: {error}")).into_response(),
+    }
+}
+
+/// Fetches every hashed asset the Web UI can ask for, once per host address, in the background: the page, its scripts and styles, and the files those name
+/// (the chunk of each page and tab). Quiet by design: one request at a time, the host is a program that is also streaming.
+pub async fn prewarm_assets() {
+    let base = get_sunshine_target().trim_end_matches('/').to_string();
+    {
+        let Ok(mut done) = PREWARMED_TARGET.lock() else { return };
+        if *done == base {
+            return;
+        }
+        *done = base.clone();
+    }
+    let get = |url: String| async move {
+        let response = send_local_authenticated_request(
+            get_http_client(),
+            &url,
+            &axum::http::Method::GET,
+            &axum::http::HeaderMap::new(),
+            &Bytes::new(),
+            Some(std::time::Duration::from_secs(30)),
+        )
+        .await
+        .ok()?;
+        if response.status() != reqwest::StatusCode::OK {
+            return None;
+        }
+        let content_type = response.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream").to_string();
+        let bytes = response.bytes().await.ok()?;
+        Some((content_type, bytes))
+    };
+    let Some((_, page)) = get(format!("{base}/")).await else {
+        if let Ok(mut done) = PREWARMED_TARGET.lock() {
+            done.clear();
+        }
+        return;
+    };
+    let mut queue: std::collections::VecDeque<(String, u8)> = std::collections::VecDeque::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for found in ASSET_PATH.find_iter(&String::from_utf8_lossy(&page)) {
+        if seen.insert(found.as_str().to_string()) {
+            queue.push_back((found.as_str().to_string(), 0));
+        }
+    }
+    let started = std::time::Instant::now();
+    let mut fetched = 0usize;
+    while let Some((path, depth)) = queue.pop_front() {
+        if fetched >= PREWARM_MAX_FILES {
+            break;
+        }
+        if !is_hashed_asset(&path) {
+            continue;
+        }
+        let have = ASSET_CACHE.lock().map(|cache| cache.files.contains_key(&path)).unwrap_or(false);
+        let Some((content_type, bytes)) = (if have { None } else { get(format!("{base}{path}")).await }) else { continue };
+        fetched += 1;
+        if path.ends_with(".js") || path.ends_with(".css") {
+            if depth < 4 {
+                let dir = path.rsplit_once('/').map(|(dir, _)| dir.to_string()).unwrap_or_default();
+                for found in ASSET_NAME.find_iter(&String::from_utf8_lossy(&bytes)) {
+                    let next = format!("{dir}/{}", found.as_str());
+                    if seen.insert(next.clone()) {
+                        queue.push_back((next, depth + 1));
+                    }
+                }
+            }
+        }
+        asset_cache_put(&path, &content_type, bytes);
+        tokio::time::sleep(std::time::Duration::from_millis(4)).await;
+    }
+    info!("Web UI assets kept: {} files in {} ms", fetched, started.elapsed().as_millis());
+}
+
 /// 判断是否应该注入脚本
 fn should_inject_script(url: &str, content_type: &str) -> bool {
     if !content_type.contains("text/html") {
@@ -1418,7 +2008,11 @@ fn inject_theme_script(html: String) -> String {
         "window.TAURI_PRODUCTION = false;"
     };
 
-    let inject_size = INJECT_STYLES.len() + INJECT_SCRIPT.len() + production_flag.len() + 150;
+    let inject_size = INJECT_STYLES.len()
+        + INJECT_TRACES.len()
+        + INJECT_SCRIPT.len()
+        + production_flag.len()
+        + 150;
     let mut result = String::with_capacity(html.len() + inject_size);
 
     result.push_str(&html[..pos]);
@@ -1426,6 +2020,8 @@ fn inject_theme_script(html: String) -> String {
     result.push_str(INJECT_STYLES);
     result.push_str("\n</style>\n<!-- Tauri 功能脚本 -->\n<script>\n");
     result.push_str(production_flag);
+    result.push_str("\n");
+    result.push_str(INJECT_TRACES);
     result.push_str("\n");
     result.push_str(INJECT_SCRIPT);
     result.push_str("\n</script>\n");
@@ -1469,6 +2065,18 @@ mod tests {
             };
         let origin = "http://127.0.0.1:48090/config";
         assert!(invoke(&main, origin, "get_vdd_status").is_ok());
+        // what the Web UI itself invokes in the frame (src_assets/common/assets/web): each is granted to the bound origin, none by accident of a wildcard
+        for web_command in [
+            "list_display_modes",
+            "set_display_mode",
+            "get_current_dpi",
+            "set_desktop_dpi",
+            "launch_windows_hdr_calibration",
+            "set_vdd_keep_enabled",
+            "set_vdd_headless_create_enabled",
+        ] {
+            assert!(invoke(&main, origin, web_command).is_ok(), "{web_command}");
+        }
         for wrong in [
             "http://127.0.0.1:48081/config",
             "https://github.com/",
@@ -1492,7 +2100,8 @@ mod tests {
     use axum::body::Body;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    static TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+    static TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(()));
 
     async fn unused_local_port() -> u16 {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1534,6 +2143,100 @@ mod tests {
         });
 
         format!("http://{}", addr)
+    }
+
+    #[test]
+    fn local_auth_token_file_requires_a_fixed_length_hex_value() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("local-auth.token");
+        let valid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        std::fs::write(&path, format!("{valid}\n")).unwrap();
+        assert_eq!(read_local_auth_token_from(&path).unwrap(), valid);
+
+        std::fs::write(&path, "not-a-token").unwrap();
+        assert!(read_local_auth_token_from(&path).is_err());
+    }
+
+    #[tokio::test]
+    async fn upstream_local_token_replaces_a_forwarded_header() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (request_seen, request_received) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let count = stream.read(&mut chunk).await.unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let _ = request_seen.send(String::from_utf8_lossy(&request).into_owned());
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "X-Sunshine-Local-Token",
+            axum::http::HeaderValue::from_static("attacker-value"),
+        );
+        let client = build_http_client(DEFAULT_PROXY_TIMEOUT_SECS);
+        let response = send_request(
+            &client,
+            &format!("http://{address}/api/config"),
+            &axum::http::Method::GET,
+            &headers,
+            &Bytes::new(),
+            None,
+            Some("expected-value"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+        let request = request_received.await.unwrap().to_ascii_lowercase();
+        assert!(request.contains("x-sunshine-local-token: expected-value"));
+        assert!(!request.contains("attacker-value"));
+    }
+
+    #[tokio::test]
+    async fn local_request_retries_once_after_unauthorized() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for response in [
+                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .as_slice(),
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .as_slice(),
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request).await;
+                stream.write_all(response).await.unwrap();
+            }
+        });
+
+        let response = send_local_authenticated_request(
+            &build_http_client(DEFAULT_PROXY_TIMEOUT_SECS),
+            &format!("http://{address}/api/config"),
+            &axum::http::Method::GET,
+            &axum::http::HeaderMap::new(),
+            &Bytes::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
@@ -1637,6 +2340,78 @@ mod tests {
             acquire_proxy_permit_with_wait(active, pending, std::time::Duration::from_secs(1))
                 .await;
         assert!(permit.is_none());
+    }
+
+    #[test]
+    fn a_pairing_long_poll_may_wait_as_long_as_it_asks_plus_five_seconds() {
+        let get = axum::http::Method::GET;
+        let secs = |url: &str| long_poll_timeout(&get, url).map(|d| d.as_secs());
+        assert_eq!(
+            secs("https://127.0.0.1:57990/api/pairing/pending?wait=25&since=7"),
+            Some(30)
+        );
+        assert_eq!(
+            secs("https://127.0.0.1:57990/api/pairing/pending?wait=600"),
+            Some(65)
+        );
+        assert_eq!(secs("https://127.0.0.1:57990/api/pairing/pending"), None);
+        assert_eq!(secs("https://127.0.0.1:57990/api/config?wait=25"), None);
+        assert_eq!(
+            long_poll_timeout(
+                &axum::http::Method::POST,
+                "https://x/api/pairing/pending?wait=25"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn slow_health_routes_have_a_separate_upstream_budget() {
+        let get = axum::http::Method::GET;
+        assert_eq!(
+            slow_api_timeout(&get, "https://127.0.0.1:57990/api/doctor?only=vdd&lang=zh")
+                .map(|duration| duration.as_secs()),
+            Some(DOCTOR_PROXY_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            slow_api_timeout(&get, "https://127.0.0.1:57990/api/runtime/sessions")
+                .map(|duration| duration.as_secs()),
+            Some(SLOW_API_PROXY_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            slow_api_timeout(&get, "https://127.0.0.1:57990/api/config"),
+            None
+        );
+        assert_eq!(
+            slow_api_timeout(
+                &axum::http::Method::POST,
+                "https://127.0.0.1:57990/api/doctor"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_failure_is_written_once_a_minute_and_the_left_out_ones_are_counted() {
+        let mut seen = std::collections::HashMap::new();
+        let start = std::time::Instant::now();
+        assert_eq!(throttle_log(&mut seen, "a", start), Some(0));
+        assert_eq!(
+            throttle_log(&mut seen, "a", start + std::time::Duration::from_secs(10)),
+            None
+        );
+        assert_eq!(
+            throttle_log(&mut seen, "a", start + std::time::Duration::from_secs(20)),
+            None
+        );
+        assert_eq!(
+            throttle_log(&mut seen, "b", start + std::time::Duration::from_secs(20)),
+            Some(0)
+        );
+        assert_eq!(
+            throttle_log(&mut seen, "a", start + std::time::Duration::from_secs(61)),
+            Some(2)
+        );
     }
 
     #[tokio::test]
@@ -1895,5 +2670,68 @@ mod tests {
             SUNSHINE_AVAILABLE.load(std::sync::atomic::Ordering::Relaxed),
             "AI proxy failure should not poison the Sunshine fast-fail cache"
         );
+    }
+}
+
+#[cfg(test)]
+mod robustness_tests {
+    use super::*;
+
+    #[test]
+    fn a_timeout_or_a_reset_never_starts_the_fast_fail_cooldown_only_a_refused_connection_does() {
+        assert!(host_is_gone("error sending request: client error (Connect): tcp connect error: Connection refused (os error 10061)"));
+        assert!(host_is_gone("No route to host"));
+        assert!(!host_is_gone("error sending request for url (https://127.0.0.1:57990/api/pairing/pending?wait=25): operation timed out"));
+        assert!(!host_is_gone("connection reset by peer"));
+        assert_eq!(FAST_FAIL_COOLDOWN_SECS, 1);
+    }
+
+    #[test]
+    fn the_whole_error_chain_is_read_so_a_timeout_is_known_as_one() {
+        #[derive(Debug)]
+        struct Outer(std::io::Error);
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "error sending request for url (https://127.0.0.1:57990/x)")
+            }
+        }
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let error = Outer(std::io::Error::new(std::io::ErrorKind::TimedOut, "operation timed out"));
+        assert!(!is_timeout_error(&error.to_string()), "the top message alone hides the reason");
+        assert!(is_timeout_error(&error_chain(&error)));
+    }
+
+    #[test]
+    fn the_long_poll_has_a_client_that_outlasts_its_wait() {
+        assert!(LONG_POLL_CLIENT_TIMEOUT_SECS >= 60 + 5, "the pairing wait is up to 60 s and the proxy adds 5");
+        assert!(DEFAULT_PROXY_TIMEOUT_SECS >= 15);
+        assert!(PROXY_CONNECT_TIMEOUT_MS >= 2000);
+    }
+
+    #[test]
+    fn only_files_named_by_their_content_are_kept() {
+        assert!(is_hashed_asset("/assets/WebShell-DsnvJrX5.js"));
+        assert!(is_hashed_asset("/assets/vue.esm-bundler-DrhpLnnP.js"));
+        assert!(is_hashed_asset("/assets/init-CQlPeCxF.css"));
+        assert!(!is_hashed_asset("/assets/css/sunshine.css"));
+        assert!(!is_hashed_asset("/assets/index.js"));
+        assert!(!is_hashed_asset("/api/config"));
+        assert!(!is_hashed_asset("/assets/../secret-AbCdEfGh.js"));
+    }
+
+    #[test]
+    fn a_kept_asset_is_answered_as_immutable() {
+        asset_cache_put("/assets/Test-AbCdEfGh.js", "text/javascript", Bytes::from_static(b"export default 1"));
+        let response = asset_cache_get("/assets/Test-AbCdEfGh.js").expect("kept");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            response.headers().get(axum::http::header::CACHE_CONTROL).and_then(|v| v.to_str().ok()),
+            Some("public, max-age=31536000, immutable")
+        );
+        assert!(asset_cache_get("/assets/Other-AbCdEfGh.js").is_none());
     }
 }
