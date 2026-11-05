@@ -48,6 +48,8 @@ mod sunshine;
 mod version_compare;
 mod sunshine_service;
 mod system;
+mod system_load;
+mod system_load_core;
 mod text_encoding;
 #[cfg(target_os = "windows")]
 mod text_context;
@@ -260,6 +262,7 @@ fn main() {
             system::get_monitors,
             system::get_system_info,
             system::get_process_memory_info,
+            system_load::system_load,
             system::get_sunshine_start_time,
             host_facts::get_sunshine_host_facts,
             sunshine::get_sunshine_install_path,
