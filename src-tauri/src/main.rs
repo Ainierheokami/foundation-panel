@@ -7,6 +7,7 @@ mod build_identity;
 mod client_fingerprint_rules;
 mod clipboard;
 mod commands;
+mod crash;
 mod controller_hub;
 mod controller_input;
 mod controllermeta;
@@ -181,6 +182,9 @@ fn main() {
     if sunshine::try_run_core_compatibility_check_from_args() {
         return;
     }
+
+    // Panics, native crashes and WebView2 failures leave a report (crash/mod.rs); the upload waits for the start to be over.
+    crash::install(env!("CARGO_PKG_VERSION"), sunshine::config_dir());
 
     // The agent mostly waits on local I/O. Bounding the shared runtime avoids
     // allocating one worker per logical CPU on high-core-count hosts. Proxy
