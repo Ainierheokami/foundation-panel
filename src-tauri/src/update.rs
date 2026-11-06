@@ -13,12 +13,12 @@ use crate::github_download::{
     DownloadAttemptPhase, DownloadRequest,
 };
 
+mod cdk_store;
+mod mirrorchyan;
 mod metadata;
 mod preferences;
 
 pub(crate) use preferences::{include_prerelease as get_include_prerelease, save_last_check_time};
-
-pub(crate) use metadata::resolve_component_download_candidates;
 
 use metadata::{
     ReleaseAsset, ReleaseCandidate, ReleaseCatalog, UpdateChannel, candidate_is_newer_than,
@@ -35,6 +35,68 @@ const UPDATE_CHECK_INTERVAL: u64 = 4 * 60 * 60; // 4小时（秒）
 const UPDATE_CACHE_MARKER_FILE: &str = "sunshine-update-cache.json";
 /// 已下载安装包的最长保留期，超过后随临时目录清理一起删除。
 const UPDATE_CACHE_MAX_AGE_SECS: u64 = 14 * 24 * 60 * 60;
+
+/// Progress of the update download, readable after the panel window was
+/// closed and opened again. The Rust task owns the transfer; the webview is
+/// only a viewer.
+#[derive(Clone, Debug, Serialize)]
+struct UpdateDownloadStatus {
+    active: bool,
+    phase: String,
+    progress: u32,
+    downloaded: u64,
+    total: u64,
+    source: Option<String>,
+    filename: String,
+    path: Option<String>,
+    error: Option<String>,
+}
+
+impl Default for UpdateDownloadStatus {
+    fn default() -> Self {
+        Self {
+            active: false,
+            phase: String::new(),
+            progress: 0,
+            downloaded: 0,
+            total: 0,
+            source: None,
+            filename: String::new(),
+            path: None,
+            error: None,
+        }
+    }
+}
+
+static UPDATE_DOWNLOAD_STATUS: OnceLock<Mutex<UpdateDownloadStatus>> = OnceLock::new();
+
+fn download_status() -> &'static Mutex<UpdateDownloadStatus> {
+    UPDATE_DOWNLOAD_STATUS.get_or_init(|| Mutex::new(UpdateDownloadStatus::default()))
+}
+
+fn set_download_status(change: impl FnOnce(&mut UpdateDownloadStatus)) {
+    if let Ok(mut status) = download_status().lock() {
+        change(&mut status);
+    }
+}
+
+/// The renderer calls this once on mount: a download started before the window
+/// was closed reports its current state instead of disappearing.
+#[tauri::command]
+pub fn download_update_status() -> serde_json::Value {
+    download_status()
+        .lock()
+        .ok()
+        .and_then(|status| serde_json::to_value(&*status).ok())
+        .unwrap_or_else(|| serde_json::json!({ "active": false }))
+}
+
+fn clear_tooltip_later(app_handle: AppHandle, delay: Duration) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(delay).await;
+        crate::tray::set_transient_tooltip(&app_handle, None);
+    });
+}
 
 // ========== 数据结构定义 ==========
 
@@ -110,6 +172,10 @@ struct UpdaterHelperState {
     gui_exe_path: String,
     result_path: String,
     parent_pid: u32,
+    /// The panel resolves its theme before elevation; older state files fall
+    /// back to the helper's documented WinRT colour query.
+    #[serde(default)]
+    dark_theme: Option<bool>,
 }
 
 #[cfg(target_os = "windows")]
@@ -147,6 +213,10 @@ struct UpdaterAnimationFrame {
     height: i32,
     bgra: Vec<u8>,
 }
+
+/// Resolved once when the window opens: the panel's theme from the helper state, else the WinRT colour query.
+#[cfg(target_os = "windows")]
+static UPDATER_DARK_THEME: OnceLock<bool> = OnceLock::new();
 
 #[cfg(target_os = "windows")]
 static UPDATER_PANEL_STATE: OnceLock<Arc<Mutex<UpdaterPanelState>>> = OnceLock::new();
@@ -224,6 +294,15 @@ fn create_update_info(candidate: &ReleaseCandidate) -> UpdateInfo {
     }
 }
 
+/// The newest version a check found when it is newer than this one (None: up to date, or no check yet): the tray's menus show it without asking again.
+static SEEN_UPDATE: Mutex<Option<String>> = Mutex::new(None);
+fn note_seen_update(version: Option<String>) {
+    *SEEN_UPDATE.lock().unwrap_or_else(|p| p.into_inner()) = version;
+}
+pub(crate) fn last_seen_update() -> Option<String> {
+    SEEN_UPDATE.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
 /// 检查更新核心逻辑。
 ///
 /// `manual=true` 时已是最新也返回 `Some(info { is_latest: true })`，
@@ -273,6 +352,7 @@ async fn check_for_updates_in_channel(
         }
     );
 
+    note_seen_update(candidate_is_newer_than(&current_version, &candidate).then(|| candidate.version.clone()));
     if !candidate_is_newer_than(&current_version, &candidate) {
         if manual {
             let mut info = create_update_info(&candidate);
@@ -516,6 +596,10 @@ fn is_gui_component_installer(path: &Path) -> bool {
 }
 
 #[cfg(target_os = "windows")]
+// Native boundary rationale and painting rules: panel-ms-createwindowex,
+// panel-ms-updatelayeredwindow, panel-ms-wmpaint,
+// panel-ms-layeredwindows, panel-ms-uisettings-getcolorvalue
+// (docs/authority/source-index.tsv).
 fn run_updater_panel(state: UpdaterHelperState) -> Result<(), String> {
     use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, HBRUSH, PAINTSTRUCT};
@@ -576,6 +660,7 @@ fn run_updater_panel(state: UpdaterHelperState) -> Result<(), String> {
         }
     }
 
+    let _ = UPDATER_DARK_THEME.set(state.dark_theme.unwrap_or_else(updater_dark_theme));
     let state_arc = Arc::new(Mutex::new(UpdaterPanelState {
         title: "准备更新".to_string(),
         subtitle: "正在启动更新助手...".to_string(),
@@ -707,6 +792,19 @@ fn updater_panel_position(width: i32, height: i32) -> (i32, i32) {
 }
 
 #[cfg(target_os = "windows")]
+fn updater_dark_theme() -> bool {
+    // GetSysColor(COLOR_WINDOW) is a legacy GDI colour and does not track the
+    // user's light/dark preference. Microsoft documents UISettings.GetColorValue
+    // as the Windows UI colour source.
+    use windows::UI::ViewManagement::{UIColorType, UISettings};
+
+    UISettings::new()
+        .and_then(|settings| settings.GetColorValue(UIColorType::Background))
+        .map(|color| u16::from(color.R) + u16::from(color.G) + u16::from(color.B) < 384)
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
 fn draw_updater_panel_cutout(hwnd: windows::Win32::Foundation::HWND) {
     use std::ffi::c_void;
     use windows::Win32::Foundation::{POINT, RECT, SIZE};
@@ -773,8 +871,9 @@ fn draw_updater_panel_cutout(hwnd: windows::Win32::Foundation::HWND) {
         let buffer = std::slice::from_raw_parts_mut(bits as *mut u8, buffer_len);
         buffer.fill(0);
 
+        let dark_theme = UPDATER_DARK_THEME.get().copied().unwrap_or(false);
         draw_updater_animation_frame(buffer, width, height, &state);
-        draw_updater_bottom_copy(buffer, width, height);
+        draw_updater_bottom_copy(buffer, width, height, &state, dark_theme);
         let mem_hdc = CreateCompatibleDC(Some(screen_hdc));
         if mem_hdc.is_invalid() {
             let _ = DeleteObject(bitmap.into());
@@ -789,15 +888,19 @@ fn draw_updater_panel_cutout(hwnd: windows::Win32::Foundation::HWND) {
             mem_hdc,
             &status_line,
             82,
-            186,
+            180,
             486,
-            210,
+            208,
             DT_LEFT | DT_WORDBREAK,
             13,
             500,
-            windows::Win32::Foundation::COLORREF(0x00705F5A),
+            if dark_theme {
+                windows::Win32::Foundation::COLORREF(0x00FAF2F5)
+            } else {
+                windows::Win32::Foundation::COLORREF(0x00342D30)
+            },
         );
-        restore_gdi_text_alpha(buffer, width, height, 82, 186, 486, 210);
+        restore_gdi_text_alpha(buffer, width, height, 82, 180, 486, 208);
 
         let mut window_rect = RECT::default();
         let _ = GetWindowRect(hwnd, &mut window_rect);
@@ -865,39 +968,17 @@ fn draw_updater_animation_frame(
     }
 }
 
-#[cfg(target_os = "windows")]
-fn draw_updater_bottom_copy(buffer: &mut [u8], width: i32, height: i32) {
-    fill_bgra_rect(buffer, width, height, 72, 186, 512, 224, (58, 63, 75, 220));
-    fill_bgra_rect(
-        buffer,
-        width,
-        height,
-        64,
-        178,
-        504,
-        216,
-        (255, 245, 221, 255),
-    );
-    fill_bgra_rect(
-        buffer,
-        width,
-        height,
-        82,
-        172,
-        132,
-        184,
-        (255, 231, 151, 255),
-    );
-    fill_bgra_rect(
-        buffer,
-        width,
-        height,
-        438,
-        210,
-        488,
-        222,
-        (255, 231, 151, 255),
-    );
+#[cfg(target_os = "windows")] #[rustfmt::skip]
+fn draw_updater_bottom_copy(
+    buffer: &mut [u8],
+    width: i32,
+    height: i32,
+    state: &UpdaterPanelState,
+    dark_theme: bool,
+) {
+    let (shadow, surface, primary, error) = if dark_theme { ((10, 9, 12, 220), (34, 32, 40, 255), (166, 216, 255, 255), (255, 180, 171, 255)) } else { ((62, 58, 68, 180), (249, 247, 252, 255), (0, 92, 122, 255), (186, 26, 26, 255)) };
+    fill_bgra_rect(buffer, width, height, 72, 186, 512, 224, shadow); fill_bgra_rect(buffer, width, height, 64, 178, 504, 216, surface); fill_bgra_rect(buffer, width, height, 104, 210, 484, 220, (120, 120, 128, 100));
+    let progress_right = 104 + 380 * state.step.min(3) as i32 / 3; if progress_right > 104 { fill_bgra_rect(buffer, width, height, 104, 210, progress_right, 220, if state.failed { error } else { primary }); } fill_bgra_rect(buffer, width, height, 82, 172, 132, 184, if state.failed { error } else { primary });
 }
 
 #[cfg(target_os = "windows")]
@@ -1031,15 +1112,15 @@ unsafe fn draw_text_styled(
     color: windows::Win32::Foundation::COLORREF,
 ) {
     use windows::Win32::Graphics::Gdi::{
-        CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH, DeleteObject,
-        FF_DONTCARE, NONANTIALIASED_QUALITY, OUT_DEFAULT_PRECIS, SelectObject,
+        ANTIALIASED_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH,
+        DeleteObject, FF_DONTCARE, OUT_DEFAULT_PRECIS, SelectObject,
     };
     use windows::core::PCWSTR;
 
     let face = to_wide_null(if text.is_ascii() {
-        "Cascadia Mono"
+        "Segoe UI Variable Text"
     } else {
-        "SimSun"
+        "Microsoft YaHei UI"
     });
     let font = unsafe {
         CreateFontW(
@@ -1054,7 +1135,7 @@ unsafe fn draw_text_styled(
             DEFAULT_CHARSET,
             OUT_DEFAULT_PRECIS,
             CLIP_DEFAULT_PRECIS,
-            NONANTIALIASED_QUALITY,
+            ANTIALIASED_QUALITY,
             DEFAULT_PITCH.0 as u32 | FF_DONTCARE.0 as u32,
             PCWSTR(face.as_ptr()),
         )
@@ -1115,7 +1196,7 @@ fn is_pid_running(pid: u32) -> bool {
         return false;
     };
 
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = crate::text_encoding::decode_console_bytes(&output.stdout);
     text.contains(&pid.to_string())
 }
 
@@ -1213,6 +1294,79 @@ pub fn get_include_prerelease_preference(app: AppHandle) -> bool {
 #[tauri::command]
 pub fn set_include_prerelease_preference(app: AppHandle, include: bool) {
     preferences::set_include_prerelease(&app, include);
+}
+
+/// Tauri命令：Mirror酱 CDK 是否已存入操作系统安全存储。只回答布尔值。
+#[tauri::command]
+pub async fn update_cdk_present() -> bool {
+    tauri::async_runtime::spawn_blocking(|| cdk_store::present(mirrorchyan::CREDENTIAL_TARGET))
+        .await
+        .unwrap_or(false)
+}
+
+/// Tauri命令：把 CDK 存入操作系统安全存储（Windows Credential Manager）。
+/// CDK 不写文件、不写日志、不跨 IPC 回传。
+#[tauri::command]
+pub async fn update_cdk_set(cdk: String) -> Result<bool, String> {
+    let cdk = cdk_store::validate_cdk(&cdk)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        cdk_store::set(mirrorchyan::CREDENTIAL_TARGET, &cdk)
+    })
+    .await
+    .map_err(|_| "系统安全存储任务失败".to_string())??;
+    Ok(true)
+}
+
+/// Tauri命令：从操作系统安全存储删除 CDK；不存在时也成功（幂等）。
+#[tauri::command]
+pub async fn update_cdk_clear() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(|| cdk_store::clear(mirrorchyan::CREDENTIAL_TARGET))
+        .await
+        .map_err(|_| "系统安全存储任务失败".to_string())??;
+    Ok(true)
+}
+
+/// Tauri命令：检查 Mirror酱 的最新版本。渲染层传入 `currentVersion` 与
+/// `channel`，CDK 在这里从安全存储读出并拼进请求 URL；回复是
+/// `{ status, json }`：`status: 0, json: null` 表示无回答（渲染层映射为
+/// network），`json` 已去掉 `data.url` 与任何 CDK 回显。完整 URL 与错误原文
+/// 都包含 CDK，绝不写日志。
+#[tauri::command]
+pub async fn update_mirrorchyan_check(
+    current_version: String,
+    channel: String,
+) -> serde_json::Value {
+    let current_version: String = current_version.chars().take(128).collect();
+    let channel = mirrorchyan::normalize_channel(&channel);
+    let cdk = read_stored_cdk().await;
+    let answer = mirrorchyan::check(&current_version, cdk.as_deref(), channel).await;
+    info!("Mirror酱 检查: {}", mirrorchyan::log_summary(&answer));
+    serde_json::json!({
+        "status": answer.status,
+        "json": mirrorchyan::sanitize_body(&answer),
+    })
+}
+
+/// Tauri命令：保存更新来源（auto|cnb|github|mirror）到 update_preferences.json。
+#[tauri::command]
+pub fn set_update_source(app: AppHandle, source: String) -> Result<bool, String> {
+    preferences::set_update_source(&app, &source)?;
+    Ok(true)
+}
+
+/// 读取安全存储中的 CDK；存储不可用或为空都按“无 CDK”处理。
+async fn read_stored_cdk() -> Option<String> {
+    match tauri::async_runtime::spawn_blocking(|| cdk_store::read(mirrorchyan::CREDENTIAL_TARGET))
+        .await
+    {
+        Ok(Ok(stored)) => stored,
+        Ok(Err(error)) => {
+            // 错误文本只含错误码，不含 CDK。
+            warn!("读取系统安全存储失败: {error}");
+            None
+        }
+        Err(_) => None,
+    }
 }
 
 /// Tauri 命令：手动检查更新
@@ -1321,6 +1475,7 @@ fn validate_update_service_image(image: &Path, install_dir: &Path) -> Result<(),
 /// Stop only this installation's service. Its existing shutdown handler owns Core cleanup.
 #[cfg(target_os = "windows")]
 fn stop_sunshine_for_update() -> Result<(), String> {
+    crate::host_facts::expect_stop(900_000);
     use std::os::windows::ffi::OsStringExt;
     use windows::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows::Win32::System::Services::*;
@@ -1362,7 +1517,7 @@ fn stop_sunshine_for_update() -> Result<(), String> {
         );
         let status = query_status(*service)?;
         if status.dwCurrentState == SERVICE_STOPPED {
-            return Ok(());
+            return end_leftover_hosts(&root);
         }
         // SCM's PID is only meaningful in stable running/paused states.
         if !matches!(status.dwCurrentState, SERVICE_RUNNING | SERVICE_PAUSED)
@@ -1404,7 +1559,7 @@ fn stop_sunshine_for_update() -> Result<(), String> {
         ControlService(*service, SERVICE_CONTROL_STOP, &mut stopped)
             .map_err(|error| format!("stop update service failed: {error}"))?;
         match WaitForSingleObject(*process, 45_000) {
-            WAIT_OBJECT_0 => Ok(()),
+            WAIT_OBJECT_0 => end_leftover_hosts(&root),
             WAIT_TIMEOUT => Err("update service did not exit; installation was cancelled".into()),
             _ => Err(format!(
                 "wait for update service failed: {}",
@@ -1412,6 +1567,15 @@ fn stop_sunshine_for_update() -> Result<(), String> {
             )),
         }
     }
+}
+
+/// The service stop reaps the child it launched. A user-mode sunshine.exe, or a child that
+/// outlived the service, is still holding the ports. End those before the installer runs.
+#[cfg(target_os = "windows")]
+fn end_leftover_hosts(root: &std::path::Path) -> Result<(), String> {
+    crate::sunshine_service::end_host_processes(root).map_err(|code| {
+        format!("sunshine.exe was still running and could not be ended ({code}); installation was cancelled")
+    })
 }
 
 #[cfg(all(test, target_os = "windows"))]
@@ -1564,7 +1728,6 @@ fn validate_download_file_identity(
         .map_err(|error| format!("读取文件头失败: {error}"))?;
     let valid_type = match asset_type {
         Some("windows-x64-installer") => count >= 2 && &header[..2] == b"MZ",
-        Some("dualsense-sidecar-zip") => count >= 2 && &header[..2] == b"PK",
         Some("checksum-json") | Some("checksum-text") | None => true,
         Some(other) => return Err(format!("不支持的下载资产类型: {other}")),
     };
@@ -1682,6 +1845,64 @@ async fn finalize_download_file(
         })
 }
 
+/// 按来源把 Mirror酱 候选（若有）排在 CNB/GitHub 之前，并保持既有的
+/// 去重规则（fallback 与主地址相同则不重复）。
+fn download_candidates(
+    mirror: Option<github_download::DownloadCandidate>,
+    url: &str,
+    fallback_url: Option<&str>,
+) -> Vec<github_download::DownloadCandidate> {
+    let mut candidates = Vec::new();
+    if let Some(mirror) = mirror {
+        candidates.push(mirror);
+    }
+    candidates.push(github_download::DownloadCandidate {
+        name: download_source_name(url),
+        url: url.to_string(),
+    });
+    if let Some(fallback_url) = fallback_url {
+        if !candidates
+            .iter()
+            .any(|candidate| candidate.url == fallback_url)
+        {
+            candidates.push(github_download::DownloadCandidate {
+                name: download_source_name(fallback_url),
+                url: fallback_url.to_string(),
+            });
+        }
+    }
+    candidates
+}
+
+/// 当 CDK 有效且 Mirror酱 给出合规下载地址时返回首选候选。地址带时效令牌，
+/// 绝不写日志；文件内容仍按本项目 metadata 的 SHA-256 校验后才安装。
+async fn mirror_download_candidate(
+    app_handle: &AppHandle,
+) -> Option<github_download::DownloadCandidate> {
+    let cdk = read_stored_cdk().await?;
+    let current_version = get_current_sunshine_version()
+        .await
+        .unwrap_or_else(|error| {
+            warn!("获取当前版本失败（Mirror酱 检查按 0.0.0 处理）: {error}");
+            "0.0.0".to_string()
+        });
+    let channel = if get_include_prerelease(app_handle) {
+        "beta"
+    } else {
+        "stable"
+    };
+    let answer = mirrorchyan::check(&current_version, Some(&cdk), channel).await;
+    info!(
+        "Mirror酱 检查（下载候选）: {}",
+        mirrorchyan::log_summary(&answer)
+    );
+    let url = mirrorchyan::download_url_of(&answer)?;
+    Some(github_download::DownloadCandidate {
+        name: "Mirror酱",
+        url,
+    })
+}
+
 /// 下载更新文件（带真实进度报告）
 #[tauri::command]
 pub async fn download_update(
@@ -1760,23 +1981,31 @@ pub async fn download_update(
         "清理旧的临时下载文件",
     )?;
 
-    let mut candidates = vec![github_download::DownloadCandidate {
-        name: download_source_name(&url),
-        url: url.clone(),
-    }];
-    if let Some(fallback_url) = fallback_url {
-        if !candidates
-            .iter()
-            .any(|candidate| candidate.url == fallback_url)
-        {
-            candidates.push(github_download::DownloadCandidate {
-                name: download_source_name(&fallback_url),
-                url: fallback_url,
-            });
-        }
-    }
+    set_download_status(|status| {
+        *status = UpdateDownloadStatus {
+            active: true,
+            phase: "connecting".to_string(),
+            filename: filename.clone(),
+            ..Default::default()
+        };
+    });
+    crate::tray::set_transient_tooltip(
+        &app_handle,
+        Some(crate::tray::download_progress_tooltip(0)),
+    );
+
+    // 来源为 mirror 且 CDK 有效时，Mirror酱 的下载地址排在最前；
+    // 任何失败（无 CDK、CDK 错误、离线、地址不合规）都静默回退 CNB → GitHub。
+    let mirror_candidate = if preferences::update_source(&app_handle) == "mirror" {
+        mirror_download_candidate(&app_handle).await
+    } else {
+        None
+    };
+    let candidates = download_candidates(mirror_candidate, &url, fallback_url.as_deref());
 
     let mut last_progress_percent = 0;
+    let mut last_tooltip_percent = 0u32;
+    let mut last_tooltip_at = std::time::Instant::now();
     let outcome = github_download::download_to_file_from_candidates(
         DownloadRequest {
             url: &url,
@@ -1792,17 +2021,42 @@ pub async fn download_update(
         },
         &candidates,
         |event| {
-            let Some(win) = window.as_ref() else {
-                return;
-            };
             match event.phase {
                 DownloadAttemptPhase::Connecting => {
                     last_progress_percent = 0;
-                    emit_download_progress(win, 0, event.total, 0, DownloadPhase::Connecting, None);
+                    set_download_status(|status| {
+                        status.phase = "connecting".to_string();
+                        status.progress = 0;
+                        status.total = event.total;
+                    });
+                    if let Some(win) = window.as_ref() {
+                        emit_download_progress(
+                            win,
+                            0,
+                            event.total,
+                            0,
+                            DownloadPhase::Connecting,
+                            None,
+                        );
+                    }
                 }
                 DownloadAttemptPhase::Retrying => {
                     last_progress_percent = 0;
-                    emit_download_progress(win, 0, event.total, 0, DownloadPhase::Retrying, None);
+                    set_download_status(|status| {
+                        status.phase = "retrying".to_string();
+                        status.progress = 0;
+                        status.total = event.total;
+                    });
+                    if let Some(win) = window.as_ref() {
+                        emit_download_progress(
+                            win,
+                            0,
+                            event.total,
+                            0,
+                            DownloadPhase::Retrying,
+                            None,
+                        );
+                    }
                 }
                 DownloadAttemptPhase::Downloading => {
                     let progress = if event.total == 0 {
@@ -1810,17 +2064,37 @@ pub async fn download_update(
                     } else {
                         (event.downloaded.saturating_mul(100) / event.total).min(99) as u32
                     };
+                    set_download_status(|status| {
+                        status.phase = "downloading".to_string();
+                        status.progress = progress;
+                        status.downloaded = event.downloaded;
+                        status.total = event.total;
+                        status.source = Some(event.source.to_string());
+                    });
+                    if progress != last_tooltip_percent
+                        && (progress >= last_tooltip_percent + 1
+                            || last_tooltip_at.elapsed() >= Duration::from_secs(1))
+                    {
+                        last_tooltip_percent = progress;
+                        last_tooltip_at = std::time::Instant::now();
+                        crate::tray::set_transient_tooltip(
+                            &app_handle,
+                            Some(crate::tray::download_progress_tooltip(progress)),
+                        );
+                    }
                     if event.total == 0 || progress > last_progress_percent || event.downloaded == 0
                     {
                         last_progress_percent = progress;
-                        emit_download_progress(
-                            win,
-                            progress,
-                            event.total,
-                            event.downloaded,
-                            DownloadPhase::Downloading,
-                            Some(event.source),
-                        );
+                        if let Some(win) = window.as_ref() {
+                            emit_download_progress(
+                                win,
+                                progress,
+                                event.total,
+                                event.downloaded,
+                                DownloadPhase::Downloading,
+                                Some(event.source),
+                            );
+                        }
                     }
                 }
             }
@@ -1828,6 +2102,16 @@ pub async fn download_update(
     )
     .await
     .map_err(|error| {
+        set_download_status(|status| {
+            status.active = false;
+            status.phase = "error".to_string();
+            status.error = Some(error.to_string());
+        });
+        crate::tray::set_transient_tooltip(
+            &app_handle,
+            Some(crate::tray::download_failed_tooltip().to_string()),
+        );
+        clear_tooltip_later(app_handle.clone(), Duration::from_secs(20));
         let code = if error.is_setup() {
             DownloadErrorCode::SetupFailed
         } else {
@@ -1843,6 +2127,16 @@ pub async fn download_update(
         asset_type.as_deref(),
     ) {
         let _ = tokio::fs::remove_file(&partial_path).await;
+        set_download_status(|status| {
+            status.active = false;
+            status.phase = "error".to_string();
+            status.error = Some(error.clone());
+        });
+        crate::tray::set_transient_tooltip(
+            &app_handle,
+            Some(crate::tray::download_failed_tooltip().to_string()),
+        );
+        clear_tooltip_later(app_handle.clone(), Duration::from_secs(20));
         return Err(DownloadCommandError::new(
             DownloadErrorCode::SourcesExhausted,
             error,
@@ -1861,6 +2155,16 @@ pub async fn download_update(
     }
     if let Err(error) = finalize_download_file(&partial_path, &file_path).await {
         let _ = tokio::fs::remove_file(&partial_path).await;
+        set_download_status(|status| {
+            status.active = false;
+            status.phase = "error".to_string();
+            status.error = Some(error.detail.clone());
+        });
+        crate::tray::set_transient_tooltip(
+            &app_handle,
+            Some(crate::tray::download_failed_tooltip().to_string()),
+        );
+        clear_tooltip_later(app_handle.clone(), Duration::from_secs(20));
         return Err(error);
     }
 
@@ -1876,6 +2180,21 @@ pub async fn download_update(
         "✅ 下载完成: {} bytes，来源: {}",
         outcome.downloaded, outcome.source
     );
+    set_download_status(|status| {
+        status.active = false;
+        status.phase = "complete".to_string();
+        status.progress = 100;
+        status.downloaded = outcome.downloaded;
+        status.total = outcome.total;
+        status.source = Some(outcome.source.to_string());
+        status.path = Some(file_path.to_string_lossy().to_string());
+        status.error = None;
+    });
+    crate::tray::set_transient_tooltip(
+        &app_handle,
+        Some(crate::tray::download_done_tooltip().to_string()),
+    );
+    clear_tooltip_later(app_handle.clone(), Duration::from_secs(10));
     if let Some(win) = window {
         emit_download_progress(
             &win,
@@ -1926,6 +2245,31 @@ pub async fn check_cached_update(
 #[cfg(test)]
 mod download_source_tests {
     use super::*;
+
+    #[test]
+    fn mirror_candidate_is_first_and_the_cnb_github_order_is_kept() {
+        let cnb = "https://cnb.cool/AlkaidLab/foundation-sunshine-release/-/releases/download/v1/setup.exe";
+        let github = "https://github.com/AlkaidLab/foundation-sunshine/releases/download/v1/setup.exe";
+        let mirror = github_download::DownloadCandidate {
+            name: "Mirror酱",
+            url: "https://mirrorchyan.com/resources/download/token".to_string(),
+        };
+
+        let with_mirror = download_candidates(Some(mirror), cnb, Some(github));
+        let names: Vec<_> = with_mirror.iter().map(|candidate| candidate.name).collect();
+        assert_eq!(names, ["Mirror酱", "CNB", "GitHub"]);
+
+        let without_mirror = download_candidates(None, cnb, Some(github));
+        let names: Vec<_> = without_mirror.iter().map(|candidate| candidate.name).collect();
+        assert_eq!(names, ["CNB", "GitHub"]);
+    }
+
+    #[test]
+    fn duplicate_fallback_url_is_not_added_twice() {
+        let cnb = "https://cnb.cool/AlkaidLab/foundation-sunshine-release/-/releases/download/v1/setup.exe";
+        let candidates = download_candidates(None, cnb, Some(cnb));
+        assert_eq!(candidates.len(), 1);
+    }
 
     #[test]
     fn download_url_requires_an_allowlisted_foundation_release_host() {
@@ -2236,14 +2580,14 @@ mod updater_staging_tests {
     #[test]
     fn unlaunched_handoff_is_cleaned_but_launched_handoff_survives() {
         let (_, state_path, _, guard) =
-            prepare_updater_helper("unused.exe", "exe", None, &"a".repeat(64), None).unwrap();
+            prepare_updater_helper("unused.exe", "exe", None, &"a".repeat(64), None, None).unwrap();
         let directory = guard.path().to_path_buf();
         assert!(state_path.is_file());
         drop(guard);
         assert!(!directory.exists());
 
         let (_, state_path, _, guard) =
-            prepare_updater_helper("unused.exe", "exe", None, &"a".repeat(64), None).unwrap();
+            prepare_updater_helper("unused.exe", "exe", None, &"a".repeat(64), None, None).unwrap();
         let directory = guard.keep();
         assert!(state_path.is_file());
         assert_eq!(
@@ -2269,6 +2613,7 @@ mod updater_staging_tests {
             gui_exe_path: String::new(),
             result_path: String::new(),
             parent_pid: std::process::id(),
+            dark_theme: None,
         };
         let staged = stage_installer_in_directory(&state, &destination).unwrap();
         assert_eq!(staged.extension().unwrap(), "exe");
@@ -2293,6 +2638,7 @@ fn prepare_updater_helper(
     expected_size: Option<u64>,
     expected_sha256: &str,
     target_version: Option<String>,
+    dark_theme: Option<bool>,
 ) -> Result<(PathBuf, PathBuf, UpdaterHelperState, tempfile::TempDir), String> {
     let current_exe =
         std::env::current_exe().map_err(|e| format!("get current exe failed: {}", e))?;
@@ -2317,6 +2663,7 @@ fn prepare_updater_helper(
         gui_exe_path: current_exe.to_string_lossy().to_string(),
         result_path: result_path.to_string_lossy().to_string(),
         parent_pid: std::process::id(),
+        dark_theme,
     };
 
     let state_content = serde_json::to_string_pretty(&state)
@@ -2362,6 +2709,7 @@ pub async fn install_update(
     target_version: Option<String>,
     expected_size: Option<u64>,
     expected_sha256: Option<String>,
+    dark_theme: Option<bool>,
     app_handle: AppHandle,
 ) -> Result<(), String> {
     #[cfg(target_os = "windows")]
@@ -2402,6 +2750,7 @@ pub async fn install_update(
             expected_size,
             &expected_sha256,
             target_version,
+            dark_theme,
         ) {
             Ok(paths) => paths,
             Err(e) => {
@@ -2428,7 +2777,10 @@ pub async fn install_update(
             tokio::time::sleep(Duration::from_secs(2)).await;
             emit_install_progress(&app_clone, "app-exiting", None, false);
             tokio::time::sleep(Duration::from_secs(1)).await;
-            app_clone.exit(0);
+            // Deliberate handoff: the installer starts the next GUI. Exit code 0
+            // would make the host treat this as a killed agent and launch another
+            // copy while the installer is replacing files.
+            app_clone.exit(crate::gui_agent_exit::GUI_AGENT_DELIBERATE_QUIT_EXIT_CODE);
         });
 
         Ok(())
