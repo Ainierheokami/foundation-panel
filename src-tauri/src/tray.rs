@@ -18,11 +18,14 @@ use crate::desktop_settings;
 use crate::{proxy_server, sunshine, toolbar, tray_config, update, utils, windows};
 
 mod actions;
+mod display_sliders;
 mod events;
 mod icons;
+mod input_source;
 mod main_panel;
 mod menu;
 mod notifications;
+pub(crate) mod popup_input;
 #[cfg(target_os = "windows")]
 mod vdd_confirmation;
 
@@ -71,6 +74,8 @@ async fn persist_latest_locale(revision: u64, locale: String) -> Result<bool, St
         return Ok(false);
     }
 
+    // the tray's language is handed to the host at the panel's start: when the host is ready (proxy_server::host_ready)
+    let _ = crate::proxy_server::host_ready(Duration::from_secs(60)).await;
     sunshine::set_sunshine_locale(locale).await?;
     Ok(true)
 }
@@ -261,6 +266,8 @@ struct TrayStrings {
     pairing_menu_instruction: &'static str,
     complete_pairing: &'static str,
     open_main_panel: &'static str,
+    connect_device: &'static str,
+    download_client: &'static str,
     interfaces_menu: &'static str,
     display_menu: &'static str,
     tools_menu: &'static str,
@@ -293,6 +300,10 @@ struct TrayStrings {
     open_desktop: &'static str,
     #[cfg(target_os = "windows")]
     auto_start: &'static str,
+    #[cfg(target_os = "windows")]
+    auto_start_off_confirm: &'static str,
+    #[cfg(target_os = "windows")]
+    switch_mode_confirm: &'static str,
     #[cfg(any(debug_assertions, feature = "beta"))]
     web_stream: &'static str,
     #[cfg(debug_assertions)]
@@ -305,11 +316,22 @@ struct TrayStrings {
     star_project: &'static str,
     visit_project_sunshine: &'static str,
     visit_project_moonlight: &'static str,
+    visit_site: &'static str,
+    visit_bilibili: &'static str,
+    star_github: &'static str,
+    sponsor_menu: &'static str,
+    // the native menu's stepped stand-ins for the menus' 码率 and 缩放 sliders (tray/menu.rs)
+    bitrate_menu: &'static str,
+    bitrate_auto: &'static str,
+    dpi_menu: &'static str,
     restart: &'static str,
     recover_service: &'static str,
     recovery_timeout: &'static str,
     tooltip: &'static str,
     tooltip_admin: &'static str,
+    download_progress: &'static str,
+    download_done: &'static str,
+    download_failed: &'static str,
 }
 
 const ZH_STRINGS: TrayStrings = TrayStrings {
@@ -333,6 +355,8 @@ const ZH_STRINGS: TrayStrings = TrayStrings {
     pairing_menu_instruction: "打开 Sunshine 托盘菜单中的“完成配对”，输入 Moonlight 上显示的 4 位 PIN。",
     complete_pairing: "完成配对",
     open_main_panel: "打开主面板",
+    connect_device: "配对新设备",
+    download_client: "下载客户端",
     interfaces_menu: "其他界面",
     display_menu: "显示",
     tools_menu: "工具",
@@ -340,14 +364,14 @@ const ZH_STRINGS: TrayStrings = TrayStrings {
     advanced_menu: "高级",
     help_menu: "帮助",
     open_sunshine: "Web 管理界面",
-    vdd_settings: "基地显示器设置（ZakoVDD）",
-    vdd_create: "创建基地显示器",
-    vdd_create_confirm: "创建基地显示器可能会更改 Windows 显示布局。是否继续？",
-    vdd_close: "关闭基地显示器",
+    vdd_settings: "基地虚拟显示器设置",
+    vdd_create: "创建基地虚拟显示器",
+    vdd_create_confirm: "创建基地虚拟显示器可能会更改 Windows 显示布局。是否继续？",
+    vdd_close: "关闭基地虚拟显示器",
     vdd_keep: "串流结束后保留",
-    vdd_keep_confirm: "启用后，串流结束时将保留基地显示器，并可能更改 Windows 显示布局。是否继续？",
+    vdd_keep_confirm: "启用后，串流结束时将保留基地虚拟显示器，并可能更改 Windows 显示布局。是否继续？",
     vdd_headless: "无头模式自动创建",
-    vdd_headless_confirm: "这是实验性恢复功能：未检测到显示器时会自动创建基地显示器，并可能更改当前显示布局。是否继续？",
+    vdd_headless_confirm: "这是实验性恢复功能：未检测到显示器时会自动创建基地虚拟显示器，并可能更改当前显示布局。是否继续？",
     import_config: "导入配置",
     export_config: "导出配置",
     reset_config: "重置配置",
@@ -364,7 +388,11 @@ const ZH_STRINGS: TrayStrings = TrayStrings {
     log_console: "日志控制台",
     open_desktop: "大屏模式",
     #[cfg(target_os = "windows")]
-    auto_start: "开机运行",
+    auto_start: "开机自动运行 Sunshine",
+    #[cfg(target_os = "windows")]
+    switch_mode_confirm: "切换运行模式会先停止 Sunshine 再重新启动，正在进行的串流会断开，需要管理员授权。继续吗？",
+    #[cfg(target_os = "windows")]
+    auto_start_off_confirm: "关闭后 Sunshine 服务改为手动启动：这台电脑重启后，Sunshine 不会自动运行，远程设备将无法连接，直到有人在这台电脑上启动它。确定关闭吗？",
     #[cfg(any(debug_assertions, feature = "beta"))]
     web_stream: "Web 串流服务",
     #[cfg(debug_assertions)]
@@ -377,11 +405,21 @@ const ZH_STRINGS: TrayStrings = TrayStrings {
     star_project: "项目主页",
     visit_project_sunshine: "Sunshine 源代码",
     visit_project_moonlight: "Moonlight 源代码",
+    visit_site: "官网",
+    visit_bilibili: "B 站",
+    star_github: "在 GitHub 点 Star",
+    sponsor_menu: "赞助",
+    bitrate_menu: "码率上限",
+    bitrate_auto: "自动",
+    dpi_menu: "缩放",
     restart: "重启 Sunshine",
     recover_service: "重新启动 Sunshine 服务",
     recovery_timeout: "Sunshine 服务未能在等待时间内恢复，请检查服务日志后重试。",
     tooltip: "Sunshine GUI",
     tooltip_admin: "Sunshine GUI (管理员)",
+    download_progress: "正在下载更新 {percent}%",
+    download_done: "更新已下载，可打开面板安装",
+    download_failed: "更新下载失败",
 };
 
 const EN_STRINGS: TrayStrings = TrayStrings {
@@ -405,6 +443,8 @@ const EN_STRINGS: TrayStrings = TrayStrings {
     pairing_menu_instruction: "Open Complete Pairing from the Sunshine tray menu and enter the 4-digit PIN shown in Moonlight.",
     complete_pairing: "Complete pairing",
     open_main_panel: "Open Main Panel",
+    connect_device: "Pair a New Device",
+    download_client: "Download a Client",
     interfaces_menu: "Other Interfaces",
     display_menu: "Display",
     tools_menu: "Tools",
@@ -412,14 +452,14 @@ const EN_STRINGS: TrayStrings = TrayStrings {
     advanced_menu: "Advanced",
     help_menu: "Help",
     open_sunshine: "Web Management UI",
-    vdd_settings: "Virtual Display Settings",
-    vdd_create: "Create Virtual Display",
-    vdd_create_confirm: "This creates a virtual display and may change the Windows display layout. Continue?",
-    vdd_close: "Close Virtual Display",
+    vdd_settings: "Foundation Virtual Display Settings",
+    vdd_create: "Create Foundation Virtual Display",
+    vdd_create_confirm: "This creates Foundation Virtual Display and may change the Windows display layout. Continue?",
+    vdd_close: "Close Foundation Virtual Display",
     vdd_keep: "Keep After Streaming",
-    vdd_keep_confirm: "Keep mode leaves the virtual display enabled after streaming ends and may change the Windows display layout. Continue?",
+    vdd_keep_confirm: "Keep mode leaves Foundation Virtual Display enabled after streaming ends and may change the Windows display layout. Continue?",
     vdd_headless: "Auto-create When Headless",
-    vdd_headless_confirm: "This experimental recovery feature creates a virtual display when no display is detected and may change the active display layout. Continue?",
+    vdd_headless_confirm: "This experimental recovery feature creates Foundation Virtual Display when no display is detected and may change the active display layout. Continue?",
     import_config: "Import Config",
     export_config: "Export Config",
     reset_config: "Reset Config",
@@ -436,7 +476,11 @@ const EN_STRINGS: TrayStrings = TrayStrings {
     log_console: "Log Console",
     open_desktop: "Large Screen Mode",
     #[cfg(target_os = "windows")]
-    auto_start: "Run at Startup",
+    auto_start: "Start Sunshine with Windows",
+    #[cfg(target_os = "windows")]
+    switch_mode_confirm: "Switching the mode stops Sunshine and starts it again: live streams end, and it needs administrator approval. Continue?",
+    #[cfg(target_os = "windows")]
+    auto_start_off_confirm: "The Sunshine service will be set to Manual: after this PC restarts, Sunshine will not run and remote devices cannot connect until someone starts it on this PC. Turn it off?",
     #[cfg(any(debug_assertions, feature = "beta"))]
     web_stream: "Web Streaming",
     #[cfg(debug_assertions)]
@@ -449,11 +493,21 @@ const EN_STRINGS: TrayStrings = TrayStrings {
     star_project: "Project Website",
     visit_project_sunshine: "Sunshine Source Code",
     visit_project_moonlight: "Moonlight Source Code",
+    visit_site: "Website",
+    visit_bilibili: "Bilibili",
+    star_github: "Star on GitHub",
+    sponsor_menu: "Sponsor",
+    bitrate_menu: "Bitrate cap",
+    bitrate_auto: "Auto",
+    dpi_menu: "Scale",
     restart: "Restart Sunshine",
     recover_service: "Restart Sunshine Service",
     recovery_timeout: "The Sunshine service did not recover in time. Check the service log and try again.",
     tooltip: "Sunshine GUI",
     tooltip_admin: "Sunshine GUI (Admin)",
+    download_progress: "Downloading update {percent}%",
+    download_done: "Update downloaded; open the panel to install",
+    download_failed: "Update download failed",
 };
 
 const JA_STRINGS: TrayStrings = TrayStrings {
@@ -477,6 +531,8 @@ const JA_STRINGS: TrayStrings = TrayStrings {
     pairing_menu_instruction: "Sunshine のトレイメニューから「ペアリングを完了」を開き、Moonlight に表示された 4 桁の PIN を入力してください。",
     complete_pairing: "ペアリングを完了",
     open_main_panel: "メインパネルを開く",
+    connect_device: "新しいデバイスをペアリング",
+    download_client: "クライアントをダウンロード",
     interfaces_menu: "その他のインターフェース",
     display_menu: "ディスプレイ",
     tools_menu: "ツール",
@@ -508,7 +564,11 @@ const JA_STRINGS: TrayStrings = TrayStrings {
     log_console: "ログコンソール",
     open_desktop: "大画面モード",
     #[cfg(target_os = "windows")]
-    auto_start: "起動時に実行",
+    auto_start: "Windows と一緒に Sunshine を起動",
+    #[cfg(target_os = "windows")]
+    switch_mode_confirm: "実行モードを切り替えると Sunshine をいったん停止して再起動します。配信中のストリームは切断され、管理者の承認が必要です。続けますか？",
+    #[cfg(target_os = "windows")]
+    auto_start_off_confirm: "Sunshine サービスを手動に変更します。この PC を再起動すると Sunshine は起動せず、この PC で誰かが起動するまでリモートデバイスから接続できません。オフにしますか？",
     #[cfg(any(debug_assertions, feature = "beta"))]
     web_stream: "Web ストリーミング",
     #[cfg(debug_assertions)]
@@ -521,11 +581,21 @@ const JA_STRINGS: TrayStrings = TrayStrings {
     star_project: "プロジェクトサイト",
     visit_project_sunshine: "Sunshine ソースコード",
     visit_project_moonlight: "Moonlight ソースコード",
+    visit_site: "公式サイト",
+    visit_bilibili: "Bilibili",
+    star_github: "GitHub でスターを付ける",
+    sponsor_menu: "支援",
+    bitrate_menu: "ビットレート上限",
+    bitrate_auto: "自動",
+    dpi_menu: "スケール",
     restart: "Sunshine を再起動",
     recover_service: "Sunshine サービスを再起動",
     recovery_timeout: "Sunshine サービスが時間内に復旧しませんでした。サービスログを確認して再試行してください。",
     tooltip: "Sunshine GUI",
     tooltip_admin: "Sunshine GUI (管理者)",
+    download_progress: "更新をダウンロード中 {percent}%",
+    download_done: "更新をダウンロードしました。パネルを開いてインストールできます",
+    download_failed: "更新のダウンロードに失敗しました",
 };
 
 fn get_tray_strings() -> &'static TrayStrings {
@@ -535,6 +605,20 @@ fn get_tray_strings() -> &'static TrayStrings {
         Some("ja") => &JA_STRINGS,
         _ => &EN_STRINGS,
     }
+}
+
+pub(crate) fn download_progress_tooltip(percent: u32) -> String {
+    get_tray_strings()
+        .download_progress
+        .replace("{percent}", &percent.min(100).to_string())
+}
+
+pub(crate) fn download_done_tooltip() -> &'static str {
+    get_tray_strings().download_done
+}
+
+pub(crate) fn download_failed_tooltip() -> &'static str {
+    get_tray_strings().download_failed
 }
 
 fn get_current_locale() -> String {
@@ -670,28 +754,24 @@ fn build_owned_system_tray<R: Runtime + 'static>(app: &AppHandle<R>) -> tauri::R
     if app.tray_by_id(TRAY_ID).is_some() {
         return Ok(());
     }
-    let menu = build_tray_menu(app)?;
     let tooltip = default_tray_tooltip();
     let tray_icon = icons::load_initial_tray_icon(app);
+    // The icon carries the native menu only when the menu window cannot show (popup_input.rs `wants_native`): while the window starts, the icon has none and a menu asked for waits for the window. A menu that
+    // is attached makes Windows show it on a right click by itself, which is what the person saw as the menu "falling back".
+    let native = popup_input::use_native_menu();
 
-    TrayIconBuilder::with_id(TRAY_ID)
-        .menu(&menu)
+    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .icon(tray_icon)
         .tooltip(tooltip)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| handle_tray_menu_event(app, event.id().as_ref()))
-        .on_tray_icon_event(|tray, event| match event {
-            TrayIconEvent::Click {
-                button: MouseButton::Left,
-                ..
-            } => handle_tray_click(tray.app_handle()),
-            TrayIconEvent::DoubleClick {
-                button: MouseButton::Left,
-                ..
-            } => handle_tray_double_click(tray.app_handle()),
-            _ => {}
-        })
-        .build(app)?;
+        // what each gesture does is the person's choice (tray_prefs.rs, 个性化): popup_input.rs
+        .on_tray_icon_event(|_tray, event| popup_input::on_icon_event(event));
+    if native {
+        builder = builder.menu(&build_tray_menu(app)?);
+    }
+    builder.build(app)?;
+    popup_input::note_native_attached(native);
 
     info!("GUI tray created for the current user session");
 
@@ -705,6 +785,12 @@ fn open_desktop_gui_from_tray<R: Runtime>(app: &AppHandle<R>, source: &str) {
 }
 
 fn open_main_panel_from_tray<R: Runtime>(app: &AppHandle<R>, source: &str) {
+    // the old window is still being closed: the panel opens when it is gone
+    if windows::closing::is_closing("main") {
+        let source = source.to_owned();
+        windows::closing::after_closed(app, "main", move |app| open_main_panel_from_tray(&app, &source));
+        return;
+    }
     if let Some(window) = app.get_webview_window("main") {
         windows::show_and_activate_window(&window);
         return;
@@ -744,6 +830,42 @@ fn default_tray_tooltip() -> &'static str {
     } else {
         s.tooltip
     }
+}
+
+/// A tooltip for work that outlives the panel window, such as an update
+/// download. Core state continues to arrive while it is set; the override is
+/// applied at the moment of each update and cleared when the work ends.
+static TRANSIENT_TOOLTIP: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
+static LAST_CORE_TOOLTIP: LazyLock<Mutex<String>> =
+    LazyLock::new(|| Mutex::new(String::new()));
+
+pub(crate) fn set_transient_tooltip<R: Runtime>(app: &AppHandle<R>, text: Option<String>) {
+    *TRANSIENT_TOOLTIP.lock().unwrap() = text;
+    let transient = { TRANSIENT_TOOLTIP.lock().unwrap().clone() };
+    let value = match transient {
+        Some(value) => value,
+        None => {
+            let last = LAST_CORE_TOOLTIP.lock().unwrap().clone();
+            if last.is_empty() {
+                default_tray_tooltip().to_string()
+            } else {
+                last
+            }
+        }
+    };
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let _ = tray.set_tooltip(Some(value.as_str()));
+    }
+}
+
+fn tooltip_with_transient(state: &sunshine::TrayState) -> String {
+    let core = tray_tooltip_from_state(state);
+    *LAST_CORE_TOOLTIP.lock().unwrap() = core.clone();
+    TRANSIENT_TOOLTIP
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or(core)
 }
 
 fn tray_tooltip_from_state(state: &sunshine::TrayState) -> String {
@@ -947,17 +1069,17 @@ mod tests {
         assert_eq!(ZH_STRINGS.open_desktop, "大屏模式");
         assert_eq!(ZH_STRINGS.show_toolbar, "显示桌宠");
         #[cfg(target_os = "windows")]
-        assert_eq!(ZH_STRINGS.auto_start, "开机运行");
+        assert_eq!(ZH_STRINGS.auto_start, "开机自动运行 Sunshine");
         assert_eq!(EN_STRINGS.open_desktop, "Large Screen Mode");
         #[cfg(target_os = "windows")]
-        assert_eq!(EN_STRINGS.auto_start, "Run at Startup");
+        assert_eq!(EN_STRINGS.auto_start, "Start Sunshine with Windows");
         assert_eq!(ZH_STRINGS.shutdown, "退出 Sunshine");
         assert_eq!(EN_STRINGS.shutdown, "Exit Sunshine");
     }
 
     #[test]
     fn native_confirmations_use_localized_tray_text() {
-        assert!(ZH_STRINGS.vdd_create_confirm.contains("基地显示器"));
+        assert!(ZH_STRINGS.vdd_create_confirm.contains("基地虚拟显示器"));
         assert!(ZH_STRINGS.vdd_keep_confirm.contains("串流结束"));
         assert!(ZH_STRINGS.vdd_headless_confirm.contains("实验性"));
         assert!(ZH_STRINGS.reset_config_confirm.contains("默认配置"));
@@ -1063,10 +1185,11 @@ fn apply_tray_state<R: Runtime + 'static>(
 
     if should_rebuild_menu {
         rebuild_tray_menu(app);
+        popup_input::refresh_native_sliders_if_native(app);
     }
 
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        let tooltip = tray_tooltip_from_state(state);
+        let tooltip = tooltip_with_transient(state);
         if let Err(e) = tray.set_tooltip(Some(tooltip.as_str())) {
             debug!("Failed to update tray tooltip from core state: {}", e);
         }
@@ -1091,8 +1214,9 @@ fn apply_core_disconnected<R: Runtime + 'static>(app: &AppHandle<R>) {
         rebuild_tray_menu(app);
     }
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        let tooltip =
-            tray_status_label(get_tray_strings(), None, CoreConnectionState::Disconnected);
+        let tooltip = TRANSIENT_TOOLTIP.lock().unwrap().clone().unwrap_or_else(|| {
+            tray_status_label(get_tray_strings(), None, CoreConnectionState::Disconnected)
+        });
         let _ = tray.set_tooltip(Some(tooltip.as_str()));
     }
     icons::apply_disconnected_tray_icon(app);
@@ -1165,15 +1289,6 @@ fn init_sunshine_user_mode_state<R: Runtime + 'static>(app: &AppHandle<R>) {
     });
 }
 
-/// 处理托盘单击事件
-pub fn handle_tray_click<R: Runtime>(app: &AppHandle<R>) {
-    open_main_panel_from_tray(app, "click");
-}
-/// 处理托盘双击事件
-pub fn handle_tray_double_click<R: Runtime>(app: &AppHandle<R>) {
-    open_main_panel_from_tray(app, "double click");
-}
-
 fn apply_next_tray_locale<R: Runtime>(app: &AppHandle<R>, locale: &str) -> (u64, String) {
     let locale = normalize_tray_locale(locale).to_string();
     let (revision, changed) = {
@@ -1224,8 +1339,11 @@ fn rebuild_tray_menu<R: Runtime>(app: &AppHandle<R>) {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         match build_tray_menu(app) {
             Ok(menu) => {
-                if let Err(e) = tray.set_menu(Some(menu)) {
-                    error!("❌ 重建托盘菜单失败: {}", e);
+                // while the menu window shows the menus, the icon has no native menu (it would open on a right click by itself)
+                if popup_input::use_native_menu() {
+                    if let Err(e) = tray.set_menu(Some(menu)) {
+                        error!("❌ 重建托盘菜单失败: {}", e);
+                    }
                 }
                 // 更新 tooltip
                 let tooltip = {
@@ -1245,11 +1363,78 @@ fn rebuild_tray_menu<R: Runtime>(app: &AppHandle<R>) {
             Err(e) => error!("❌ 构建托盘菜单失败: {}", e),
         }
     }
+    // a menu of the popup that is on screen shows the new state
+    popup_input::push_state_if_open();
+    // the native menu's steps follow the display (a client with another size, the virtual display resized): read again; the menu is rebuilt only when what it shows changed
+    popup_input::refresh_native_sliders_if_native(app);
+}
+
+/// The display whose scale the sliders and the Panel's pages change: the one the stream uses, else the virtual display, else the primary one (None: the primary one).
+pub(crate) async fn scale_display() -> Option<String> {
+    popup_input::scale_display().await
 }
 
 /// Tauri 命令：前端通知 tray 同步语言
 pub fn refresh_menu<R: Runtime>(app: &AppHandle<R>) {
     rebuild_tray_menu(app);
+}
+
+/// The page of the menu window has loaded (the first time, or again after the window was made again): its failures are forgotten and the icon takes the menu mode the settings say.
+pub(crate) fn menu_window_loaded<R: Runtime>(app: &AppHandle<R>) {
+    popup_input::reset_failures();
+    popup_input::apply_menu_mode(app);
+}
+
+/// The icon carries the native menu or none, as the settings and the state of the menu window say (see popup_input.rs).
+pub(crate) fn refresh_menu_mode<R: Runtime>(app: &AppHandle<R>) {
+    popup_input::apply_menu_mode(app);
+}
+
+/// 个性化: what the tray icon does.
+#[tauri::command]
+pub fn tray_prefs_get() -> crate::tray_prefs::TrayPrefs {
+    crate::tray_prefs::current()
+}
+
+#[tauri::command]
+pub fn tray_prefs_set(app: AppHandle, prefs: crate::tray_prefs::TrayPrefs) -> Result<crate::tray_prefs::TrayPrefs, String> {
+    // the layout of the quick panel is written only by tray_layout_set / tray_popup_layout: a page opened before an edit in the menu must not put the old layout back
+    let saved = crate::tray_prefs::save_keeping_layout(prefs)?;
+    popup_input::reset_failures();
+    refresh_menu_mode(&app);
+    Ok(saved)
+}
+
+/// 个性化 > 托盘: the tiles and the sliders of the quick panel (V3), in order; null = the default. Returns the record as kept.
+#[tauri::command]
+pub fn tray_layout_set(tiles: Option<Vec<String>>, sliders: Option<Vec<String>>) -> Result<crate::tray_prefs::TrayPrefs, String> {
+    crate::tray_prefs::save_layout(tiles, sliders)
+}
+
+/// The quick panel's edit mode (the pencil): the same layout, set from the menu that is on screen; the state with it goes back to the menu.
+#[tauri::command]
+pub async fn tray_popup_layout(app: AppHandle, token: u64, tiles: Option<Vec<String>>, sliders: Option<Vec<String>>) -> Result<(), String> {
+    let _ = token; // one tray menu is open at a time; a late answer for another is refused by `tray_menu_open`
+    popup_input::set_layout(&app, tiles, sliders).await
+}
+
+/// The tray menu's page chose an item (an id of the native menu): it runs through the same handler.
+/// Async on purpose: a synchronous command runs on the main thread inside the page's own WebView2 callback, and the big screen (made on demand) built its WebView there and never came back
+/// (the whole panel stopped). The item runs on a worker thread, as the in-app 大屏 button does.
+#[tauri::command]
+pub async fn tray_popup_act(app: AppHandle, token: u64, id: String) {
+    let ran = tauri::async_runtime::spawn_blocking(move || popup_input::act(&app, token, &id)).await;
+    if let Err(error) = ran {
+        error!("tray: the chosen item did not run: {error}");
+    }
+}
+
+/// A slider of the tray's quick page was released (key: resolution | refresh | dpi | bitrate): the menu stays open; resolves when the value is set, rejects with the reason. What it resolves with is a notice
+/// for the page: null, or for the scale `{ requested, applied, clamped: true, max }` when the display does not allow the step without signing out and the highest one it allows was set.
+#[tauri::command]
+pub async fn tray_popup_set(app: AppHandle, token: u64, key: String, value: serde_json::Value) -> Result<serde_json::Value, String> {
+    let _ = token; // one tray menu is open at a time; a late answer for another is refused by `tray_menu_open`
+    popup_input::set(&app, &key, &value).await
 }
 
 #[tauri::command]

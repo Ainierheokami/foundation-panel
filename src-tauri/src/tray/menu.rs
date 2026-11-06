@@ -141,6 +141,16 @@ pub(super) fn build_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<M
         true,
         None::<&str>,
     )?;
+    // pairing and installing a client are rare and are looked for when they are needed: two entries that open the panel's connect dialog on its tab
+    let connect_device =
+        MenuItem::with_id(app, "connect_device", s.connect_device, true, None::<&str>)?;
+    let download_client = MenuItem::with_id(
+        app,
+        "download_client",
+        s.download_client,
+        true,
+        None::<&str>,
+    )?;
     #[cfg(target_os = "windows")]
     let recover_service = MenuItem::with_id(
         app,
@@ -180,6 +190,40 @@ pub(super) fn build_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<M
         core_connected,
         None::<&str>,
     )?;
+    // the stepped stand-ins for the sliders of the three menus (the native menu cannot draw a slider): 码率上限 and 缩放, the ones the person's list (`layout.sliders`) has; the tick is what was read a moment ago
+    let slider_keys = popup_input::native_slider_keys();
+    let (bitrate_now, dpi_now) = popup_input::native_slider_values();
+    let bitrate_submenu = if slider_keys.iter().any(|k| k == "bitrate") {
+        let mut steps = Vec::new();
+        for mbps in popup_input::NATIVE_BITRATE_MBPS {
+            let label = if mbps == 0 { s.bitrate_auto.to_string() } else { format!("{mbps} Mbps") };
+            steps.push(CheckMenuItem::with_id(app, format!("slider_bitrate_{mbps}"), label, core_connected, bitrate_now == Some(mbps * 1000), None::<&str>)?);
+        }
+        let refs: Vec<&dyn tauri::menu::IsMenuItem<R>> = steps.iter().map(|i| i as &dyn tauri::menu::IsMenuItem<R>).collect();
+        let now = match bitrate_now {
+            Some(0) => format!(": {}", s.bitrate_auto),
+            Some(kbps) => format!(": {} Mbps", kbps as f64 / 1000.0),
+            None => String::new(),
+        };
+        Some(Submenu::with_id_and_items(app, "bitrate", format!("{}{}", s.bitrate_menu, now), core_connected, &refs)?)
+    } else {
+        None
+    };
+    // the steps are the ones the display the sliders point at allows now without signing out (read with the ticks); no submenu until they are read
+    #[cfg(target_os = "windows")]
+    let dpi_submenu = match dpi_now.as_ref().filter(|_| slider_keys.iter().any(|k| k == "dpi")) {
+        Some(range) => {
+            let mut steps = Vec::new();
+            for pct in range.options.iter().copied() {
+                steps.push(CheckMenuItem::with_id(app, format!("slider_dpi_{pct}"), format!("{pct}%"), true, range.current == pct, None::<&str>)?);
+            }
+            let refs: Vec<&dyn tauri::menu::IsMenuItem<R>> = steps.iter().map(|i| i as &dyn tauri::menu::IsMenuItem<R>).collect();
+            Some(Submenu::with_id_and_items(app, "dpi", format!("{}: {}%", s.dpi_menu, range.current), true, &refs)?)
+        }
+        None => None,
+    };
+    #[cfg(not(target_os = "windows"))]
+    let _ = dpi_now;
     let interfaces_submenu = Submenu::with_id_and_items(
         app,
         "interfaces",
@@ -251,7 +295,12 @@ pub(super) fn build_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<M
         true,
         None::<&str>,
     )?;
-    let rtss_control = MenuItem::with_id(app, "rtss_control", s.rtss_control, true, None::<&str>)?;
+    // RivaTuner Statistics Server is optional: its entry exists only where it is installed (the same `installed` as get_rtss_status)
+    let rtss_control = if crate::rtss::is_rtss_installed() {
+        Some(MenuItem::with_id(app, "rtss_control", s.rtss_control, true, None::<&str>)?)
+    } else {
+        None
+    };
     #[cfg(any(debug_assertions, feature = "beta"))]
     let web_stream = MenuItem::with_id(app, "web_stream", s.web_stream, true, None::<&str>)?;
     let tools_separator = PredefinedMenuItem::separator(app)?;
@@ -260,8 +309,10 @@ pub(super) fn build_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<M
     let debug_page = MenuItem::with_id(app, "debug_page", s.debug_page, true, None::<&str>)?;
 
     #[allow(unused_mut)]
-    let mut tools_items: Vec<&dyn tauri::menu::IsMenuItem<R>> =
-        vec![&show_toolbar, &host_performance, &rtss_control];
+    let mut tools_items: Vec<&dyn tauri::menu::IsMenuItem<R>> = vec![&show_toolbar, &host_performance];
+    if let Some(rtss_control) = &rtss_control {
+        tools_items.push(rtss_control);
+    }
     #[cfg(any(debug_assertions, feature = "beta"))]
     tools_items.push(&web_stream);
     tools_items.push(&tools_separator);
@@ -387,6 +438,21 @@ pub(super) fn build_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<M
         true,
         None::<&str>,
     )?;
+    // the support line at the foot of the help submenu: website, Bilibili, a star, and a sponsor submenu with the three developers (the same line as the popup menu's help page)
+    let support_separator = PredefinedMenuItem::separator(app)?;
+    let visit_site = MenuItem::with_id(app, "visit_site", s.visit_site, true, None::<&str>)?;
+    let visit_bilibili = MenuItem::with_id(app, "visit_bilibili", s.visit_bilibili, true, None::<&str>)?;
+    let star_github = MenuItem::with_id(app, "star_github", s.star_github, true, None::<&str>)?;
+    let sponsor_qiin = MenuItem::with_id(app, "sponsor_qiin", "qiin2333", true, None::<&str>)?;
+    let sponsor_yundi339 = MenuItem::with_id(app, "sponsor_yundi339", "Yundi339", true, None::<&str>)?;
+    let sponsor_skyhua = MenuItem::with_id(app, "sponsor_skyhua", "skyhua0224", true, None::<&str>)?;
+    let sponsor_submenu = Submenu::with_id_and_items(
+        app,
+        "sponsor",
+        s.sponsor_menu,
+        true,
+        &[&sponsor_qiin, &sponsor_yundi339, &sponsor_skyhua],
+    )?;
     let help_submenu = Submenu::with_id_and_items(
         app,
         "help",
@@ -399,6 +465,11 @@ pub(super) fn build_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<M
             &star_project,
             &visit_project_sunshine,
             &visit_project_moonlight,
+            &support_separator,
+            &visit_site,
+            &visit_bilibili,
+            &star_github,
+            &sponsor_submenu,
         ],
     )?;
 
@@ -428,9 +499,19 @@ pub(super) fn build_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<M
     }
     items.push(&primary_separator);
     items.push(&open_main_panel);
+    items.push(&connect_device);
+    items.push(&download_client);
     items.push(&open_desktop);
     #[cfg(target_os = "windows")]
     items.push(&auto_start);
+    // right under the first group, where the sliders are in the three menus
+    if let Some(submenu) = &bitrate_submenu {
+        items.push(submenu);
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(submenu) = &dpi_submenu {
+        items.push(submenu);
+    }
     items.push(&interfaces_submenu);
     items.push(&display_submenu);
     items.push(&tools_submenu);

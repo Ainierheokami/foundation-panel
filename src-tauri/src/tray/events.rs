@@ -13,6 +13,8 @@ pub(super) fn start_tray_state_monitoring<R: Runtime + 'static>(app: &AppHandle<
         let mut disconnected = false;
 
         loop {
+            // the first state is asked for when the host is ready (proxy_server::host_ready), not by failing and asking again every 3 s
+            let _ = crate::proxy_server::host_ready(Duration::from_secs(30)).await;
             match sunshine::get_tray_state().await {
                 Ok(state) => {
                     contract_error_visible = false;
@@ -123,6 +125,7 @@ fn apply_if_new<R: Runtime + 'static>(
         state.revision,
         force_reconcile,
     ) {
+        crate::launch_splash::on_tray_state(app, &state);
         #[cfg(target_os = "windows")]
         if state.vdd.awaiting_confirmation && state.vdd.confirmation_operation_id != 0 {
             vdd_confirmation::show(app, state.vdd.confirmation_operation_id);
@@ -151,6 +154,7 @@ fn accept_state_revision(
 }
 
 fn mark_core_disconnected<R: Runtime + 'static>(app: &AppHandle<R>) {
+    crate::launch_splash::on_core_disconnected(app);
     let disconnect_handle = app.clone();
     if let Err(e) = app.run_on_main_thread(move || {
         apply_core_disconnected(&disconnect_handle);

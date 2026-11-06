@@ -3,10 +3,25 @@ use super::*;
 #[cfg(target_os = "windows")]
 const RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
+// The addresses of the support line (help page of the popup menu and the native menu's 帮助 submenu). The website follows the menu language (.cn for Chinese); the Bilibili channel is one address;
+// the sponsor pages are the 爱发电 pages of config/sponsors.js (a Panel test compares them).
+const BILIBILI_URL: &str = "https://space.bilibili.com/3690974838524514";
+const STAR_URL: &str = "https://github.com/AlkaidLab/foundation-sunshine";
+
+fn site_url(locale: &str) -> &'static str {
+    if locale == "zh" {
+        "https://www.alkaidlab.cn/"
+    } else {
+        "https://www.alkaidlab.com/"
+    }
+}
+
 pub fn handle_tray_menu_event<R: Runtime + 'static>(app: &AppHandle<R>, menu_id: &str) {
     let s = get_tray_strings();
     match menu_id {
         "open_main_panel" => open_main_panel_from_tray(app, "menu"),
+        "connect_device" => open_connect_dialog(app, "pair"),
+        "download_client" => open_connect_dialog(app, "install"),
         "open_sunshine" => open_sunshine_web_ui(app),
         "tray_notification_action" => handle_tray_notification_action(app),
         "open_desktop" => {
@@ -51,13 +66,13 @@ pub fn handle_tray_menu_event<R: Runtime + 'static>(app: &AppHandle<R>, menu_id:
         "show_toolbar" => toggle_toolbar(app),
         "rtss_control" => {
             info!("🎯 托盘菜单：打开 RTSS 控制");
-            if let Err(e) = toolbar::create_tool_window_internal(app, "rtss") {
+            if let Err(e) = windows::open_main_panel_page(app, "rtss") {
                 error!("创建工具窗口失败: {}", e);
             }
         }
         "host_performance" => {
             info!("📊 托盘菜单：打开主机性能监控");
-            if let Err(e) = toolbar::create_tool_window_internal(app, "performance") {
+            if let Err(e) = windows::open_main_panel_page(app, "live-session") {
                 error!("创建工具窗口失败: {}", e);
             }
         }
@@ -86,9 +101,24 @@ pub fn handle_tray_menu_event<R: Runtime + 'static>(app: &AppHandle<R>, menu_id:
         "visit_project_moonlight" => {
             utils::open_url_in_browser("https://github.com/qiin2333/moonlight-vplus")
         }
+        // the support line of 帮助 (m3e SUPPORT_ROW) and the same entries in the native menu: opened with the same opener as the project links above
+        "visit_site" => utils::open_url_in_browser(site_url(&get_current_locale())),
+        "visit_bilibili" => utils::open_url_in_browser(BILIBILI_URL),
+        "star_github" => utils::open_url_in_browser(STAR_URL),
+        "sponsor_qiin" => utils::open_url_in_browser("https://www.ifdian.net/a/qiin2333"),
+        "sponsor_yundi339" => utils::open_url_in_browser("https://www.ifdian.net/a/Yundi339"),
+        "sponsor_skyhua" => utils::open_url_in_browser("https://ifdian.net/a/skyhua"),
         "restart" => restart_sunshine(app),
+        // the native menu's stepped stand-ins for the menus' bitrate and scale sliders (menu.rs)
+        _ if popup_input::native_slider_event(app, menu_id) => {}
         _ => warn!("⚠️ 未知的托盘菜单事件: {}", menu_id),
     }
+}
+
+/// Open the main panel and tell it to show the connect dialog on a tab (`pair` or `install`); the panel gets the event when it is ready, also when it had to be created first.
+fn open_connect_dialog<R: Runtime>(app: &AppHandle<R>, tab: &str) {
+    open_main_panel_from_tray(app, "connect");
+    emit_to_main_when_ready(app, "open-connect", serde_json::json!({ "tab": tab }));
 }
 
 /// 打开 VDD 设置
@@ -329,7 +359,8 @@ fn recover_sunshine_service<R: Runtime>(app: &AppHandle<R>) {
 
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = sunshine::restart_sunshine_service().await {
+        // recovery runs while the host is disconnected: no stream is live to acknowledge
+        if let Err(error) = sunshine::restart_sunshine_service(None).await {
             if finish_recovery_attempt(attempt) {
                 error!("Failed to recover Sunshine service from tray: {}", error);
                 refresh_recovery_menu(&app_handle);
@@ -391,7 +422,9 @@ fn shutdown_sunshine<R: Runtime>(app: &AppHandle<R>) {
             let shutdown_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
                 match sunshine::post_tray_action("shutdown", None).await {
-                    Ok(response) if response.status => shutdown_handle.exit(0),
+                    Ok(response) if response.status => {
+                        shutdown_handle.exit(crate::gui_agent_exit::GUI_AGENT_DELIBERATE_QUIT_EXIT_CODE)
+                    }
                     Ok(response) => {
                         let message = if response.error.is_empty() {
                             "Sunshine shutdown was rejected".to_string()
@@ -459,6 +492,10 @@ fn open_main_window_view<R: Runtime + 'static>(
     event: &'static str,
     description: &'static str,
 ) {
+    if windows::closing::is_closing("main") {
+        windows::closing::after_closed(app, "main", move |app| open_main_window_view(&app, event, description));
+        return;
+    }
     if app.get_webview_window("main").is_none()
         && let Err(e) = windows::create_main_window(app)
     {
@@ -492,24 +529,37 @@ async fn update_sunshine_mode_state<R: Runtime + 'static>(app: &AppHandle<R>, ch
     });
 }
 
-/// 切换 Sunshine 运行模式
+/// 切换 Sunshine 运行模式: asks first (the switch stops Sunshine, ends live streams and needs administrator
+/// approval), then runs it through the hardened elevated helper.
 #[cfg(target_os = "windows")]
-fn toggle_sunshine_mode<R: Runtime>(app: &AppHandle<R>) {
+fn toggle_sunshine_mode<R: Runtime + 'static>(app: &AppHandle<R>) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     info!("🔄 托盘菜单：切换 Sunshine 模式");
     refresh_menu(app);
+    let strings = get_tray_strings();
     let app_handle = app.clone();
+    app.dialog()
+        .message(strings.switch_mode_confirm)
+        .title(strings.restart_user_mode)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::YesNo)
+        .show(move |confirmed| {
+            if confirmed {
+                run_sunshine_mode_switch(app_handle);
+            }
+        });
+}
 
+#[cfg(target_os = "windows")]
+fn run_sunshine_mode_switch<R: Runtime + 'static>(app_handle: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
-        match crate::sunshine::toggle_sunshine_mode().await {
+        // the dialog said that live streams end: that is the acknowledgement
+        match crate::sunshine::toggle_sunshine_mode(Some(true)).await {
             Ok(msg) => {
                 info!("✅ {}", msg);
                 emit_message(&app_handle, "success", &msg);
-
-                // 切换由 UAC 提升的 PowerShell 在后台执行，需预留 UAC + stop + start
-                // 两次检查以减少"中间状态"导致的误判
-                tokio::time::sleep(Duration::from_secs(6)).await;
+                // the helper waits for the SCM; one check now and one after the host has had time to answer
                 update_sunshine_mode_state(&app_handle, "首次").await;
-
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 update_sunshine_mode_state(&app_handle, "二次").await;
             }
@@ -581,15 +631,46 @@ fn check_for_updates<R: Runtime>(app: &AppHandle<R>) {
     });
 }
 
-/// 切换防止睡眠功能
+/// The tray's start-up item. With SunshineService it sets the service start
+/// type through the same back end as 系统 › Sunshine 服务; turning it off
+/// (Manual) first asks for confirmation that the host will not be reachable
+/// after a reboot. Without the service it toggles the panel's own start-up.
 #[cfg(target_os = "windows")]
 fn toggle_auto_start<R: Runtime + 'static>(app: &AppHandle<R>) {
     let enabled = !desktop_settings::is_combined_auto_start_enabled();
     refresh_menu(app);
+    let needs_confirmation = !enabled
+        && matches!(
+            desktop_settings::startup_owner(),
+            Ok(desktop_settings::StartupOwner::Service(_))
+        );
+    if needs_confirmation {
+        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+        let strings = get_tray_strings();
+        let app_handle = app.clone();
+        app.dialog()
+            .message(strings.auto_start_off_confirm)
+            .title(strings.auto_start)
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::YesNo)
+            .show(move |confirmed| {
+                if confirmed {
+                    apply_auto_start(&app_handle, false, true);
+                } else {
+                    refresh_menu(&app_handle);
+                }
+            });
+        return;
+    }
+    apply_auto_start(app, enabled, false);
+}
+
+#[cfg(target_os = "windows")]
+fn apply_auto_start<R: Runtime + 'static>(app: &AppHandle<R>, enabled: bool, acknowledged: bool) {
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = tauri::async_runtime::spawn_blocking(move || {
-            desktop_settings::set_combined_auto_start_enabled(enabled)
+            desktop_settings::set_combined_auto_start_enabled(enabled, acknowledged)
         })
         .await
         .map_err(|error| error.to_string())
@@ -598,9 +679,9 @@ fn toggle_auto_start<R: Runtime + 'static>(app: &AppHandle<R>) {
         let menu_handle = app_handle.clone();
         let _ = app_handle.run_on_main_thread(move || {
             match result {
-                Ok(()) => info!("Combined Core and tray auto-start changed: {}", enabled),
+                Ok(()) => info!("Start-up changed from the tray: {}", enabled),
                 Err(error) => {
-                    error!("Failed to update combined auto-start: {}", error);
+                    error!("Failed to update start-up: {}", error);
                     emit_message(
                         &menu_handle,
                         "error",
