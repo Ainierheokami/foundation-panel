@@ -208,7 +208,7 @@ fn main() {
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
             // 初始化日志系统（需要在 setup 中获取 app handle）
-            logger::init_logger(app.handle().clone());
+            logger::init_logger();
             client_fingerprint_rules::start();
             stall_watch::start(app.handle().clone());
             info!("🚀 Sunshine Control Panel 启动中...");
@@ -379,6 +379,7 @@ fn main() {
             file_transfer::send_file_to_client,
             windows::webview_heartbeat,
             windows::resize_about_window,
+            logger::frontend_slow,
             windows::resize_tool_window,
             hdr_enhanced::nr_live_status,
             hdr_enhanced::nr_live_set_enabled,
