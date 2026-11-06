@@ -3,6 +3,7 @@
 //! The Panel keeps the release source policy here so the UI, tray entry point,
 //! startup check, and native update request all resolve the same candidates.
 
+use crate::version_compare::version_key;
 use futures_util::StreamExt;
 use regex::Regex;
 use reqwest::Url;
@@ -11,7 +12,6 @@ use std::cmp::Ordering;
 use std::time::Duration;
 use tokio::time::{Instant, sleep, timeout};
 
-use crate::github_download::DownloadCandidate;
 
 const METADATA_COM_URL: &str =
     "https://www.alkaidlab.com/release-metadata/foundation-sunshine.json";
@@ -337,8 +337,6 @@ fn known_asset_type(asset_type: &str) -> bool {
         asset_type,
         "windows-x64-installer"
             | "windows-x64-portable"
-            | "dualsense-sidecar-zip"
-            | "dualsense-sidecar-manifest"
             | "checksum-json"
             | "checksum-text"
     )
@@ -359,12 +357,6 @@ fn classify_asset_name(name: &str) -> Option<&'static str> {
     }
     if lower.starts_with("sunshine") && lower.contains("portable") && lower.ends_with(".zip") {
         return Some("windows-x64-portable");
-    }
-    if lower.contains("ds5sidecar") && lower.ends_with(".zip") {
-        return Some("dualsense-sidecar-zip");
-    }
-    if lower.contains("ds5sidecar") && lower.ends_with(".manifest.json") {
-        return Some("dualsense-sidecar-manifest");
     }
     if lower == "checksums.json" {
         return Some("checksum-json");
@@ -394,17 +386,6 @@ fn encoded_download_url(tag: &str, name: &str) -> String {
     url.to_string()
 }
 
-fn encoded_cnb_download_url(tag: &str, name: &str) -> String {
-    let mut url =
-        Url::parse("https://cnb.cool/AlkaidLab/foundation-sunshine-release/-/releases/download")
-            .expect("built-in CNB download URL must be valid");
-    url.path_segments_mut()
-        .expect("CNB download URL must be a base URL")
-        .push(tag)
-        .push(name);
-    url.to_string()
-}
-
 pub(crate) fn decode_segment(value: &str) -> Result<String, String> {
     let bytes = value.as_bytes();
     let mut output = Vec::with_capacity(bytes.len());
@@ -428,34 +409,6 @@ pub(crate) fn decode_segment(value: &str) -> Result<String, String> {
         }
     }
     String::from_utf8(output).map_err(|_| "URL 编码不是合法 UTF-8".to_string())
-}
-
-fn github_release_download_tag(url: &str, name: &str) -> Result<String, String> {
-    let parsed = Url::parse(url).map_err(|error| format!("下载地址无效: {error}"))?;
-    if parsed.scheme() != "https"
-        || parsed.host_str() != Some("github.com")
-        || parsed.port().is_some_and(|port| port != 443)
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-    {
-        return Err("组件下载地址必须是无凭据的 GitHub HTTPS 地址".to_string());
-    }
-    let segments = parsed
-        .path_segments()
-        .ok_or_else(|| "组件下载地址缺少路径".to_string())?
-        .collect::<Vec<_>>();
-    if segments.len() != 6
-        || segments[0] != GITHUB_OWNER
-        || segments[1] != GITHUB_REPOSITORY
-        || segments[2] != "releases"
-        || segments[3] != "download"
-        || decode_segment(segments[5])? != name
-    {
-        return Err("组件下载地址不是 Foundation Sunshine Release 资产".to_string());
-    }
-    decode_segment(segments[4])
 }
 
 fn validate_release_download_url(url: &str, tag: &str, name: &str) -> Result<(), String> {
@@ -649,21 +602,6 @@ fn validate_github_release_page(url: &str, tag: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn version_key(version: &str) -> Vec<u64> {
-    version
-        .trim()
-        .trim_start_matches(['v', 'V'])
-        .split('.')
-        .map(|part| {
-            part.chars()
-                .take_while(|character| character.is_ascii_digit())
-                .collect::<String>()
-                .parse::<u64>()
-                .unwrap_or(0)
-        })
-        .collect()
-}
-
 pub(crate) fn compare_candidates(left: &ReleaseCandidate, right: &ReleaseCandidate) -> Ordering {
     if let (Some(left_id), Some(right_id)) = (left.github_release_id, right.github_release_id)
         && left_id != right_id
@@ -675,6 +613,7 @@ pub(crate) fn compare_candidates(left: &ReleaseCandidate, right: &ReleaseCandida
     {
         return left_time.cmp(right_time);
     }
+    // the date part only (.杂鱼, a commit and any other suffix do not count); an unreadable version sorts below a readable one
     version_key(&left.version)
         .cmp(&version_key(&right.version))
         .then_with(|| match (left.prerelease, right.prerelease) {
@@ -688,7 +627,7 @@ pub(crate) fn compare_candidates(left: &ReleaseCandidate, right: &ReleaseCandida
 }
 
 pub(crate) fn candidate_is_newer_than(current_version: &str, candidate: &ReleaseCandidate) -> bool {
-    version_key(&candidate.version) > version_key(current_version)
+    crate::version_compare::is_newer(current_version, &candidate.version)
 }
 
 fn select_channel(catalog: &ReleaseCatalog, channel: UpdateChannel) -> Option<ReleaseCandidate> {
@@ -1019,13 +958,11 @@ async fn ensure_channel_candidates(
 pub(crate) async fn resolve_catalog(channel: UpdateChannel) -> Result<ReleaseCatalog, String> {
     if current_locale_is_chinese().await {
         let overall_deadline = Instant::now() + METADATA_OVERALL_TIMEOUT;
-        let com = fetch_metadata_endpoint(METADATA_COM_URL, false, overall_deadline);
-        let cn = fetch_metadata_endpoint(METADATA_CN_URL, true, overall_deadline);
-        let (com, cn) = tokio::join!(com, cn);
-        if let Ok(catalog) = com {
+        // One host first, the mirror only when it failed: a check is one request, not two.
+        if let Ok(catalog) = fetch_metadata_endpoint(METADATA_COM_URL, false, overall_deadline).await {
             return ensure_channel_candidates(catalog, channel).await;
         }
-        if let Ok(catalog) = cn {
+        if let Ok(catalog) = fetch_metadata_endpoint(METADATA_CN_URL, true, overall_deadline).await {
             return ensure_channel_candidates(catalog, channel).await;
         }
 
@@ -1036,65 +973,6 @@ pub(crate) async fn resolve_catalog(channel: UpdateChannel) -> Result<ReleaseCat
     }
 
     fetch_github_catalog(channel).await
-}
-
-/// Resolve mirror candidates for a component whose exact release identity is
-/// pinned by its installed manifest. Metadata is only used when it describes
-/// the same asset and SHA-256; otherwise the tag from the canonical GitHub URL
-/// is used to derive the CNB and GitHub candidates directly.
-pub(crate) async fn resolve_component_download_candidates(
-    asset_type: &str,
-    asset_name: &str,
-    expected_sha256: &str,
-    canonical_url: &str,
-) -> Result<Vec<DownloadCandidate>, String> {
-    let expected_sha256 = normalize_sha256(expected_sha256)
-        .ok_or_else(|| "组件 manifest 的 SHA-256 无效".to_string())?;
-    let tag = github_release_download_tag(canonical_url, asset_name)?;
-    let canonical_url = encoded_download_url(&tag, asset_name);
-    let mut candidates = Vec::new();
-
-    let mut add_candidate = |name: &'static str, url: String| {
-        let Ok(parsed) = Url::parse(&url) else {
-            return;
-        };
-        if parsed.scheme() != "https"
-            || candidates
-                .iter()
-                .any(|item: &DownloadCandidate| item.url == url)
-        {
-            return;
-        }
-        candidates.push(DownloadCandidate { name, url });
-    };
-
-    if current_locale_is_chinese().await {
-        // The normal metadata path already implements .com/.cn priority and
-        // CNB/GitHub fallback. Do not accept a newer or different component:
-        // Sidecar must match the installed Sunshine manifest exactly.
-        if let Ok(catalog) = resolve_catalog(UpdateChannel::StableOnly).await {
-            if let Some(release) = catalog.latest {
-                for asset in release.assets.into_iter().filter(|asset| {
-                    asset.asset_type == asset_type
-                        && asset.name == asset_name
-                        && asset.sha256.eq_ignore_ascii_case(&expected_sha256)
-                }) {
-                    add_candidate("official metadata", asset.url);
-                    if let Some(fallback) = asset.fallback_url {
-                        add_candidate("metadata fallback", fallback);
-                    }
-                }
-            }
-        }
-
-        add_candidate("CNB", encoded_cnb_download_url(&tag, asset_name));
-    }
-
-    add_candidate("GitHub", canonical_url);
-    if candidates.is_empty() {
-        return Err("没有可用的组件下载地址".to_string());
-    }
-    Ok(candidates)
 }
 
 pub(crate) fn select_candidate(
@@ -1204,27 +1082,6 @@ mod tests {
     }
 
     #[test]
-    fn component_mirror_url_preserves_release_tag_and_asset_name() {
-        let github = encoded_download_url("v2026.925.152547.杂鱼", "Sunshine.Ds5Sidecar.x64.zip");
-        let tag = github_release_download_tag(&github, "Sunshine.Ds5Sidecar.x64.zip").unwrap();
-        let cnb = encoded_cnb_download_url(&tag, "Sunshine.Ds5Sidecar.x64.zip");
-        assert!(cnb.contains("cnb.cool/AlkaidLab/foundation-sunshine-release"));
-        assert!(cnb.contains("%E6%9D%82%E9%B1%BC"));
-        assert!(cnb.ends_with("Sunshine.Ds5Sidecar.x64.zip"));
-    }
-
-    #[test]
-    fn component_mirror_url_rejects_another_repository() {
-        assert!(
-            github_release_download_tag(
-                "https://github.com/other/project/releases/download/v1/Sunshine.Ds5Sidecar.x64.zip",
-                "Sunshine.Ds5Sidecar.x64.zip",
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
     fn parses_cnb_unicode_tag_and_release_asset_links() {
         let html = r#"
           <a href="/AlkaidLab/foundation-sunshine-release/-/releases/tag/v2026.925.152547.%E6%9D%82%E9%B1%BC">latest</a>
@@ -1268,5 +1125,41 @@ mod tests {
         };
         assert_eq!(compare_candidates(&pre, &stable), Ordering::Greater);
         assert!(candidate_is_newer_than("v2026.925.152547.旧", &pre));
+    }
+
+    #[test]
+    fn a_suffix_or_an_unreadable_installed_version_never_offers_an_update() {
+        let candidate = |version: &str| ReleaseCandidate {
+            version: version.to_string(),
+            prerelease: false,
+            github_release_id: None,
+            published_at: None,
+            release_notes: String::new(),
+            release_page: String::new(),
+            assets: Vec::new(),
+        };
+        let release = candidate("v2026.1112.25657.杂鱼");
+        // the same version with and without .杂鱼, padded or not, with a commit: not an update
+        for installed in [
+            "2026.1112.025657",
+            "2026.1112.025657.杂鱼",
+            "2026.1112.025657.970e0298b",
+            "2026.1112.025657.8123456",
+            "manual-20261112-025657-dev",
+        ] {
+            assert!(!candidate_is_newer_than(installed, &release), "{installed}");
+        }
+        // an installed version that cannot be read is never "older than everything"
+        for installed in ["Unknown", "", "manual-latest"] {
+            assert!(!candidate_is_newer_than(installed, &release), "{installed}");
+        }
+        assert!(candidate_is_newer_than("2026.1031.121458.杂鱼", &release));
+        // a candidate that cannot be read is not newer either
+        assert!(!candidate_is_newer_than("2026.1031.121458.杂鱼", &candidate("manual-latest")));
+        // sorting: the readable version is the newer one
+        assert_eq!(
+            compare_candidates(&release, &candidate("manual-latest")),
+            Ordering::Greater
+        );
     }
 }
