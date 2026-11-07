@@ -11,6 +11,7 @@ mod crash;
 mod controller_hub;
 mod controller_input;
 mod controllermeta;
+mod ctx_popup;
 mod desktop_settings;
 mod device_config;
 mod dualsense;
@@ -27,6 +28,7 @@ mod host_facts_math;
 mod host_version;
 mod hwinfo;
 mod logger;
+mod menu_place;
 mod moonlight_web;
 mod native_tools;
 mod power;
@@ -378,6 +380,12 @@ fn main() {
             windows::webview_heartbeat,
             windows::resize_about_window,
             logger::frontend_slow,
+            ctx_popup::ctx_popup_loaded,
+            ctx_popup::ctx_popup_open,
+            ctx_popup::ctx_popup_ready,
+            ctx_popup::ctx_popup_pick,
+            ctx_popup::ctx_popup_cancel,
+            ctx_popup::ctx_popup_selftest,
             windows::resize_tool_window,
             hdr_enhanced::nr_live_status,
             hdr_enhanced::nr_live_set_enabled,
@@ -413,6 +421,7 @@ fn main() {
             tray::tray_popup_set,
             tray::tray_layout_set,
             tray::tray_popup_layout,
+            ctx_popup::tray_popup_theme_set,
             tray::get_tray_locale,
             tray::main_panel_loading,
             tray::main_panel_ready,
@@ -424,7 +433,14 @@ fn main() {
         tauri::RunEvent::ExitRequested {
             code: None, api, ..
         } => api.prevent_exit(),
+        // the application goes down: the menu window that is destroyed with the rest is not made again
+        tauri::RunEvent::ExitRequested { code: Some(_), .. } => {
+            ctx_popup::note_exiting();
+            windows::hide_all_windows(app_handle);
+        }
         tauri::RunEvent::Exit => {
+            ctx_popup::note_exiting();
+            windows::hide_all_windows(app_handle);
             native_tools::shutdown_all();
             app::shutdown_application(app_handle);
         }
