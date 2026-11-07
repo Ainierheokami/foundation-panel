@@ -47,6 +47,7 @@ export default defineConfig(() => ({
         toolbar: resolve(rendererSrcPath, 'toolbar/index.html'),
         toolWindow: resolve(rendererSrcPath, 'tool-window/index.html'),
         desktop: resolve(rendererSrcPath, 'desktop/index.html'),
+        launchSplash: resolve(rendererSrcPath, 'launch-splash/index.html'),
       },
     },
   },

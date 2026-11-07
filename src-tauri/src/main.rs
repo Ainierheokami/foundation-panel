@@ -43,6 +43,7 @@ mod rtss_frame_rates;
 mod perf;
 mod hdr_enhanced;
 mod native_components;
+mod launch_splash;
 mod nr_overlay;
 #[cfg(target_os = "windows")]
 mod shell_context_menu;
@@ -390,6 +391,9 @@ fn main() {
             hdr_enhanced::nr_live_status,
             hdr_enhanced::nr_live_set_enabled,
             hdr_enhanced::nr_live_remember,
+            launch_splash::launch_splash_frame,
+            launch_splash::launch_splash_prepared,
+            launch_splash::launch_splash_painted,
             nr_overlay::nr_overlay_capture_shortcut,
             nr_overlay::nr_overlay_settings,
             nr_overlay::nr_overlay_save_settings,
