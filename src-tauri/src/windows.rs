@@ -2,12 +2,16 @@ use crate::proxy_server;
 use log::{debug, error, info, warn};
 use std::sync::LazyLock;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::{
     AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewWindow,
     webview::PageLoadEvent,
 };
 
+pub(crate) mod building;
+pub(crate) mod closing;
 pub(crate) mod lifecycle;
+mod surface;
 
 #[derive(Default)]
 struct ToolWindowMoveSave {
@@ -19,9 +23,6 @@ static TOOL_WINDOW_MOVE_SAVE: LazyLock<Mutex<ToolWindowMoveSave>> =
     LazyLock::new(|| Mutex::new(ToolWindowMoveSave::default()));
 
 const MAIN_WINDOW_ID: &str = "main";
-const ABOUT_WINDOW_ID: &str = "about";
-const LOG_CONSOLE_WINDOW_ID: &str = "log_console";
-const PIN_WINDOW_ID: &str = "pin_pairing";
 const DESKTOP_WINDOW_ID: &str = "desktop";
 const TOOL_WINDOW_ID: &str = "tool_window";
 #[cfg(debug_assertions)]
@@ -155,80 +156,162 @@ fn constrain_tool_window_to_visible_area(
     Ok(())
 }
 
-/// 禁用窗口的右键菜单（仅在生产环境）
+/// The right-click menu, the browser keys and the drag ghosts are closed by the guard script of every page (src-tauri/inject-traces.js: the panel windows bundle it,
+/// the framed Web pages get it from the proxy), which keeps the paste menu of a text field. The engine side is `harden_browser_surface`.
 #[cfg(not(debug_assertions))]
-pub fn disable_context_menu<R: Runtime>(window: &WebviewWindow<R>) {
-    const DISABLE_CONTEXT_MENU_SCRIPT: &str = r#"
-        (function() {
-            document.addEventListener('contextmenu', e => { e.preventDefault(); return false; }, true);
-            document.addEventListener('keydown', e => {
-                if (e.keyCode === 123 || // F12
-                    (e.ctrlKey && e.shiftKey && (e.keyCode === 73 || e.keyCode === 74)) || // Ctrl+Shift+I/J
-                    (e.ctrlKey && e.keyCode === 85)) { // Ctrl+U
-                    e.preventDefault();
-                    return false;
-                }
-            }, true);
-        })();
-    "#;
-
-    let window_clone = window.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        match window_clone.eval(DISABLE_CONTEXT_MENU_SCRIPT) {
-            Ok(_) => debug!("✅ 已禁用右键菜单（生产环境）"),
-            Err(e) => debug!("⚠️ 禁用右键菜单脚本注入失败: {}", e),
-        }
-    });
-}
+pub fn disable_context_menu<R: Runtime>(_window: &WebviewWindow<R>) {}
 
 /// 开发环境不执行任何操作
 #[cfg(debug_assertions)]
 pub fn disable_context_menu<R: Runtime>(_window: &WebviewWindow<R>) {}
 
+/// The renderer mounted its first view: a window that waits to be shown is shown now.
+#[tauri::command]
+pub fn panel_content_ready(window: tauri::WebviewWindow) {
+    log::info!("[cold] content ready in {}", window.label());
+    lifecycle::content_ready(&window);
+    // the window of the context menu is made once the main window has its first view (hidden; it is never in the way of the first paint)
+    if window.label() == MAIN_WINDOW_ID {
+        crate::ctx_popup::schedule_create(window.app_handle());
+    }
+}
+
+/// A measurement instance (SUNSHINE_GUI_TEST_OFFSCREEN = 1): its main window opens outside every monitor, is never activated and logs its WM_SIZE timing.
+/// Nothing of it shows on the desk of whoever uses the machine.
+pub(crate) fn test_offscreen() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SUNSHINE_GUI_TEST_OFFSCREEN").is_some_and(|value| value != "0"))
+}
+
+/// Whether the first show of the main window is cloaked (DWM) until the page has painted its first frame (SUNSHINE_GUI_COLD_CLOAK = on | off).
+const COLD_CLOAK_DEFAULT: bool = false;
+
+fn cold_cloak_wanted() -> bool {
+    if let Some(chosen) = crate::dev_tools::cold_cloak_override() {
+        return chosen;
+    }
+    match std::env::var("SUNSHINE_GUI_COLD_CLOAK").ok().as_deref() {
+        Some("on") => true,
+        Some("off") => false,
+        _ => COLD_CLOAK_DEFAULT,
+    }
+}
+
+/// The main window is cloaked and shown to WebView2 (it renders) but not to the person.
+static COLD_CLOAK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static COLD_CLOAK_SINCE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+/// How long the window stays cloaked after the page exists if its first paint does not come.
+const COLD_CLOAK_CAP: Duration = Duration::from_millis(600);
+
+#[cfg(target_os = "windows")]
+pub(crate) fn set_cloak<R: Runtime>(window: &WebviewWindow<R>, cloaked: bool) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmSetWindowAttribute};
+    use windows::core::BOOL;
+    if let Ok(hwnd) = window.hwnd() {
+        let value = BOOL::from(cloaked);
+        // DWMWA_CLOAK = 13
+        if let Err(error) = unsafe { DwmSetWindowAttribute(HWND(hwnd.0), DWMWINDOWATTRIBUTE(13), (&value as *const BOOL).cast(), size_of::<BOOL>() as u32) } {
+            warn!("DwmSetWindowAttribute(DWMWA_CLOAK, {cloaked}) failed: {error}");
+        }
+    }
+}
+
+/// Uncloaks the main window (once) and takes the focus as the first show would have.
+fn uncloak_cold<R: Runtime>(window: &WebviewWindow<R>, why: &str) {
+    if !COLD_CLOAK.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    if closing::is_closing(window.label()) {
+        info!("[close] {}: not uncloaked, it is closing ({why})", window.label());
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    set_cloak(window, false);
+    log::info!("[cold] uncloaked {} ms after the window was made ({why})", COLD_CLOAK_SINCE.get().map_or(0, |since| since.elapsed().as_millis()));
+    if !test_offscreen() {
+        let _ = window.set_focus();
+        #[cfg(target_os = "windows")]
+        force_activate_window_win32(window);
+    }
+}
+
+/// The page painted its first frame: the cloaked window shows it.
+#[tauri::command]
+pub fn panel_first_paint(window: tauri::WebviewWindow) {
+    uncloak_cold(&window, "first paint");
+}
+
+/// The page is being used (pointer, key, wheel): the warm snapshot of the cover waits for quiet.
+#[tauri::command]
+pub fn panel_activity() {
+    lifecycle::note_activity();
+}
+
+/// Measurement instances only: the message Windows sends when the scale of the window's monitor changes, with the size the window gets at the new scale.
+/// An off-screen window gets none from the system, and the display of whoever uses the machine stays as it is.
+#[tauri::command]
+pub fn test_synthetic_dpi(window: tauri::WebviewWindow, dpi: u32) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    if !test_offscreen() {
+        return Err("only a measurement instance takes a synthetic scale change".to_string());
+    }
+    send_synthetic_dpi(&window, dpi)
+}
+
+/// The message itself: used by the measurement instances above and by the developer page (dev_tools), which asks the person first.
+pub(crate) fn send_synthetic_dpi(window: &tauri::WebviewWindow, dpi: u32) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
+        use windows::Win32::UI::HiDpi::GetDpiForWindow;
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, SendMessageW, WM_DPICHANGED};
+        let hwnd = HWND(window.hwnd().map_err(|e| e.to_string())?.0);
+        // the system's DPI of the window never changes here: the scale the last synthetic message set is the one this one changes from
+        static CURRENT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let known = CURRENT.swap(dpi, std::sync::atomic::Ordering::SeqCst);
+        let (mut rect, old) = (RECT::default(), if known == 0 { unsafe { GetDpiForWindow(hwnd) }.max(1) } else { known });
+        unsafe { GetWindowRect(hwnd, &mut rect) }.map_err(|e| e.to_string())?;
+        let size = |extent: i32| (i64::from(extent) * i64::from(dpi) / i64::from(old)) as i32;
+        let suggested = RECT { left: rect.left, top: rect.top, right: rect.left + size(rect.right - rect.left), bottom: rect.top + size(rect.bottom - rect.top) };
+        unsafe { SendMessageW(hwnd, WM_DPICHANGED, Some(WPARAM(((dpi << 16) | dpi) as usize)), Some(LPARAM(&suggested as *const RECT as isize))) };
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (window, dpi);
+        Err("windows only".to_string())
+    }
+}
+
+/// The page's layout has matched the window for a while after a change of scale: the cover over it fades out.
+#[tauri::command]
+pub fn panel_dpi_settled(window: tauri::WebviewWindow, token: u64) {
+    lifecycle::dpi_settled(&window, token);
+}
+
+/// The renderer's theme surface colour: the colour the window and WebView2 show before a
+/// frame is painted (resize, restore, first start). Kept for the next start.
+#[tauri::command]
+pub fn panel_set_surface(window: tauri::WebviewWindow, r: u8, g: u8, b: u8) -> Result<(), String> {
+    window
+        .set_background_color(Some(tauri::window::Color(r, g, b, 255)))
+        .map_err(|e| e.to_string())?;
+    surface::store((r, g, b));
+    #[cfg(target_os = "windows")]
+    {
+        static LOGGED: std::sync::Mutex<Option<(u8, u8, u8)>> = std::sync::Mutex::new(None);
+        if test_offscreen() && LOGGED.lock().unwrap().replace((r, g, b)) != Some((r, g, b)) {
+            let _ = window.with_webview(move |webview| lifecycle::log_default_background(&webview.controller(), &format!("reported #{r:02x}{g:02x}{b:02x}")));
+        }
+    }
+    Ok(())
+}
+
 /// WebView 心跳命令：由前端 JS 定期调用，表明渲染进程仍然存活
 #[tauri::command]
 pub fn webview_heartbeat(webview: tauri::Webview, generation: u64) {
     lifecycle::heartbeat(webview.label(), generation);
-}
-
-/// Resize the About window to match its web content height.
-#[tauri::command]
-pub fn resize_about_window(window: tauri::Window, height: f64) -> Result<(), String> {
-    if window.label() != ABOUT_WINDOW_ID {
-        return Err("resize_about_window can only be called from the About window".to_string());
-    }
-
-    if !height.is_finite() {
-        return Err("Invalid about window height".to_string());
-    }
-
-    let scale_factor = window
-        .scale_factor()
-        .map_err(|e| format!("Failed to get window scale factor: {}", e))?;
-    let current_size = window
-        .inner_size()
-        .map_err(|e| format!("Failed to get window size: {}", e))?;
-    let current_width = current_size.width as f64 / scale_factor;
-    let current_height = current_size.height as f64 / scale_factor;
-    let max_height = window
-        .current_monitor()
-        .ok()
-        .flatten()
-        .map(|monitor| (monitor.size().height as f64 / scale_factor - 120.0).max(420.0))
-        .unwrap_or(900.0);
-    let target_height = height.clamp(420.0, max_height);
-
-    if (current_height - target_height).abs() < 1.0 {
-        return Ok(());
-    }
-
-    window
-        .set_size(tauri::Size::Logical(tauri::LogicalSize::new(
-            current_width,
-            target_height,
-        )))
-        .map_err(|e| format!("Failed to resize about window: {}", e))
 }
 
 /// Resize the floating tool window to match its web content size.
@@ -316,9 +399,25 @@ pub fn resize_tool_window(window: tauri::Window, width: f64, height: f64) -> Res
 
 /// 显示并激活窗口（解决权限隔离问题）
 pub fn show_and_activate_window<R: Runtime>(window: &WebviewWindow<R>) {
+    // a window that is being closed is never shown again: what is left of it is a flat surface in the frame the system gives a window nobody answers for
+    if closing::is_closing(window.label()) {
+        info!("[close] {}: show refused, the window is closing", window.label());
+        return;
+    }
+    log::info!("[cold] window {} shown", window.label());
+    let cloaked = COLD_CLOAK.load(std::sync::atomic::Ordering::SeqCst) && window.label() == MAIN_WINDOW_ID;
     let _ = window.unminimize();
     let _ = window.show();
-    let _ = window.set_focus();
+    if cloaked {
+        // the person sees the window when the page has painted; if that does not come, after the cap
+        let capped = window.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(COLD_CLOAK_CAP).await;
+            uncloak_cold(&capped, "cap");
+        });
+    } else if !test_offscreen() {
+        let _ = window.set_focus();
+    }
 
     // 恢复 WebView 活跃状态（引擎级 + JS 级）
     lifecycle::presented(window);
@@ -327,7 +426,9 @@ pub fn show_and_activate_window<R: Runtime>(window: &WebviewWindow<R>) {
     proxy_server::reset_fast_fail();
 
     #[cfg(target_os = "windows")]
-    force_activate_window_win32(window);
+    if !test_offscreen() && !cloaked {
+        force_activate_window_win32(window);
+    }
 
     #[cfg(target_os = "windows")]
     if !matches!(window.label(), MAIN_WINDOW_ID | DESKTOP_WINDOW_ID) {
@@ -456,95 +557,39 @@ where
 
 /// 打开关于窗口（单例模式）
 pub fn open_about_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    let window = get_or_create_window(app, ABOUT_WINDOW_ID, |app| {
-        tauri::WebviewWindowBuilder::new(
-            app,
-            ABOUT_WINDOW_ID,
-            tauri::WebviewUrl::App("about/index.html".into()),
-        )
-        .title("关于 Sunshine Control Panel")
-        .inner_size(540.0, 620.0)
-        .resizable(false)
-        .maximizable(false)
-        .minimizable(true)
-        .decorations(true)
-        .center()
-        .build()
-    })?;
-
-    #[cfg(target_os = "windows")]
-    configure_webview_security(&window);
-
-    disable_context_menu(&window);
-    debug!("✅ 关于窗口已打开");
-    Ok(())
+    open_main_panel_page(app, "about")
 }
 
 /// 打开日志控制台窗口（单例模式）
 pub fn open_log_console<R: Runtime>(app: &AppHandle<R>) {
-    match get_or_create_window(app, LOG_CONSOLE_WINDOW_ID, |app| {
-        tauri::WebviewWindowBuilder::new(
-            app,
-            LOG_CONSOLE_WINDOW_ID,
-            tauri::WebviewUrl::App("console/index.html".into()),
-        )
-        .title("日志控制台")
-        .inner_size(1000.0, 700.0)
-        .resizable(true)
-        .maximizable(true)
-        .minimizable(true)
-        .decorations(true)
-        .center()
-        .build()
-    }) {
-        Ok(window) => {
-            #[cfg(target_os = "windows")]
-            configure_webview_security(&window);
-            disable_context_menu(&window);
-            debug!("✅ 日志控制台窗口已打开");
-        }
-        Err(e) => error!("❌ {}", e),
+    if let Err(error) = open_main_panel_page(app, "logs") {
+        error!("❌ {}", error);
     }
 }
 
 pub fn open_pin_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(window) = app.get_webview_window(PIN_WINDOW_ID) {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
-        debug!("✅ PIN 窗口已激活");
-        crate::power::refresh_ecoqos_state(app);
+    open_main_panel_page(app, "pairing").map_err(Into::into)
+}
+
+pub fn open_main_panel_page<R: Runtime>(app: &AppHandle<R>, page: &str) -> Result<(), String> {
+    if closing::is_closing(MAIN_WINDOW_ID) {
+        let page = page.to_owned();
+        closing::after_closed(app, MAIN_WINDOW_ID, move |app| {
+            if let Err(error) = open_main_panel_page(&app, &page) {
+                error!("[close] main: the page {page} could not be opened after the close: {error}");
+            }
+        });
         return Ok(());
     }
-
-    let window = tauri::WebviewWindowBuilder::new(
-        app,
-        PIN_WINDOW_ID,
-        tauri::WebviewUrl::App("pin/index.html".into()),
-    )
-    .title("PIN 配对")
-    .fullscreen(true)
-    .decorations(false)
-    .transparent(true)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .visible(false)
-    .build()
-    .map_err(|e| format!("创建 PIN 窗口失败: {}", e))?;
-
-    disable_context_menu(&window);
-
-    // 禁用自动填充和密码保存提示
-    #[cfg(target_os = "windows")]
-    configure_webview_security(&window);
-
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        let _ = window.show();
-    });
-
-    debug!("✅ PIN 配对窗口创建成功");
-    crate::power::refresh_ecoqos_state(app);
+    if app.get_webview_window(MAIN_WINDOW_ID).is_none() {
+        create_main_window(app).map_err(|error| error.to_string())?;
+    }
+    let window = app
+        .get_webview_window(MAIN_WINDOW_ID)
+        .ok_or_else(|| "main panel window is unavailable".to_string())?;
+    show_and_activate_window(&window);
+    crate::panel_page::open_page(&window, page);
+    debug!("✅ main panel page requested: {page}");
     Ok(())
 }
 
@@ -602,15 +647,17 @@ fn create_main_window_internal<R: Runtime>(
     crate::tray::mark_main_panel_loading();
     let panel = lifecycle::register(MAIN_WINDOW_ID, visible);
     let page_panel = panel.clone();
-    let window = tauri::WebviewWindowBuilder::new(
+    let builder = tauri::WebviewWindowBuilder::new(
         app,
         MAIN_WINDOW_ID,
         tauri::WebviewUrl::App("sunshine-frame.html".into()),
     )
     .title("Sunshine Control Panel")
     .inner_size(1280.0, 800.0)
-    .min_inner_size(1024.0, 600.0)
-    .center()
+    .min_inner_size(480.0, 560.0);
+    let builder = if test_offscreen() { builder.position(6000.0, 100.0) } else { builder.center() };
+    let window = builder
+    .background_color(surface::startup_color())
     .decorations(false)
     // DWM clips the native window to rounded corners. Keeping WebView2
     // opaque avoids stale transparent composition surfaces after restore.
@@ -640,11 +687,30 @@ fn create_main_window_internal<R: Runtime>(
     #[cfg(target_os = "windows")]
     configure_webview_security(&window);
 
+    // A window that is to be shown is shown at once, cloaked: WebView2 renders for a window that is shown, and the person sees it when the page has painted
+    // (panel_first_paint), not before, so the frames between are never the bare surface colour.
+    #[cfg(target_os = "windows")]
+    if visible && cold_cloak_wanted() {
+        COLD_CLOAK_SINCE.get_or_init(Instant::now);
+        COLD_CLOAK.store(true, std::sync::atomic::Ordering::SeqCst);
+        set_cloak(&window, true);
+        let _ = window.show();
+        info!("[cold] window main shown cloaked");
+        let safety = window.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            uncloak_cold(&safety, "safety");
+        });
+    }
+
     disable_context_menu(&window);
     info!("✅ {}主窗口创建成功", visibility_desc);
     crate::power::refresh_ecoqos_state(app);
     Ok(())
 }
+
+/// How long a made desktop window waits for its page before it is shown anyway.
+const DESKTOP_SHOW_CAP: Duration = Duration::from_millis(4000);
 
 /// 创建桌面 UI 窗口
 pub fn create_desktop_window<R: Runtime>(
@@ -665,7 +731,9 @@ fn create_desktop_window_internal<R: Runtime>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("🖥️ 创建桌面 UI 窗口...");
 
-    let panel = lifecycle::register(DESKTOP_WINDOW_ID, false);
+    // The window is made hidden and shown when the page has loaded (lifecycle, as the main window), never before:
+    // shown at creation it was an empty surface in its frame until the page painted.
+    let panel = lifecycle::register(DESKTOP_WINDOW_ID, visible);
     let page_panel = panel.clone();
 
     let window = tauri::WebviewWindowBuilder::new(
@@ -680,7 +748,7 @@ fn create_desktop_window_internal<R: Runtime>(
     .decorations(false)
     .transparent(false)
     .shadow(false)
-    .visible(visible)
+    .visible(false)
     .fullscreen(true)
     .disable_drag_drop_handler()
     .initialization_script(panel.initialization_script())
@@ -704,6 +772,18 @@ fn create_desktop_window_internal<R: Runtime>(
     #[cfg(target_os = "windows")]
     configure_webview_security(&window);
 
+    if visible {
+        // if the page never loads, the window still comes
+        let safety = window.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(DESKTOP_SHOW_CAP).await;
+            if matches!(safety.is_visible(), Ok(false)) && !closing::is_closing(safety.label()) {
+                warn!("[desktop] no first view after {} ms: showing the window", DESKTOP_SHOW_CAP.as_millis());
+                show_and_activate_window(&safety);
+            }
+        });
+    }
+
     disable_context_menu(&window);
     info!("✅ 桌面 UI 窗口创建成功");
     crate::power::refresh_ecoqos_state(app);
@@ -712,13 +792,35 @@ fn create_desktop_window_internal<R: Runtime>(
 
 /// 打开桌面 UI 窗口（单例模式）
 pub fn open_desktop_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    if closing::is_closing(DESKTOP_WINDOW_ID) {
+        closing::after_closed(app, DESKTOP_WINDOW_ID, |app| {
+            if let Err(error) = open_desktop_window(&app) {
+                error!("[close] desktop: it could not be opened after the close: {error}");
+            }
+        });
+        return Ok(());
+    }
     if let Some(window) = app.get_webview_window(DESKTOP_WINDOW_ID) {
         show_and_activate_window(&window);
         debug!("✅ 桌面 UI 窗口已激活");
+    } else if building::on_worker() {
+        building::build_once(DESKTOP_WINDOW_ID, || create_desktop_window(app))?;
     } else {
-        create_desktop_window(app).map_err(|e| e.to_string())?;
+        // made on demand from the tray menu's command, the native menu or a second launch: handlers of the main thread, where building a WebView deadlocks (windows/building.rs)
+        building::run_off_main(app, DESKTOP_WINDOW_ID, |app| {
+            if let Err(error) = open_desktop_window(&app) {
+                error!("[window] desktop: it could not be made: {error}");
+            }
+        });
     }
     Ok(())
+}
+
+/// 关闭桌面 UI 窗口。主机在串流结束时通过 undo 命令 `sunshine-gui.exe --close-desktop` 调用（见 handle_single_instance），
+/// 这样大屏不会留在主机屏幕上；窗口本来就没开时什么也不做。返回是否真的关了一个窗口。
+pub fn close_desktop_window<R: Runtime>(app: &AppHandle<R>) -> bool {
+    // `close()` reaches `closing::close_requested`: the window is hidden before its WebView goes
+    closing::close_window(app, DESKTOP_WINDOW_ID, "the host's --close-desktop")
 }
 
 /// 激活主窗口
@@ -728,6 +830,10 @@ pub fn activate_main_window(app: &tauri::AppHandle, target_url: Option<String>) 
         target_url
     );
 
+    if closing::is_closing(MAIN_WINDOW_ID) {
+        closing::after_closed(app, MAIN_WINDOW_ID, move |app| activate_main_window(&app, target_url));
+        return;
+    }
     let created = if app.get_webview_window(MAIN_WINDOW_ID).is_none() {
         info!("主窗口尚未创建，正在从用户会话 agent 按需创建");
         if let Err(e) = create_main_window(app) {
@@ -854,10 +960,14 @@ pub(crate) fn configure_webview_security<R: Runtime>(window: &WebviewWindow<R>) 
                     }
                 }
             }
+            // a WebView2 process that fails (renderer, GPU, browser) is recorded for the crash report
+            crate::crash::register_webview_failures(&core_webview);
             let Ok(settings) = core_webview.Settings() else {
                 log::warn!("⚠️ 无法获取 ICoreWebView2Settings [{}]", label);
                 return;
             };
+
+            harden_browser_surface(&core_webview, &settings, &label);
 
             // Cast 到 Settings4（WebView2 SDK 1.0.902+，所有现代版本均支持）
             match settings.cast::<ICoreWebView2Settings4>() {
@@ -880,6 +990,115 @@ pub(crate) fn configure_webview_security<R: Runtime>(window: &WebviewWindow<R>) 
     });
 }
 
+/// The WebView is the engine of the panel, never a browser the person can see. Closes what WebView2 shows of its browser: the address bubble over a hovered link,
+/// the built-in error page, zoom (keys, wheel, pinch), the browser keys (reload, print, find, view source; the DevTools keys stay in debug builds), the native
+/// right-click menu (the page cancels it except in a text field or over a selection, where only cut, copy, paste, select all, undo and redo are left), swipe navigation, new windows (a target=_blank link opens the system browser) and
+/// the download bubble.
+#[cfg(target_os = "windows")]
+unsafe fn harden_browser_surface(
+    core_webview: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
+    settings: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings,
+    label: &str,
+) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_4, ICoreWebView2_11, ICoreWebView2Settings3, ICoreWebView2Settings5,
+        ICoreWebView2Settings6,
+    };
+    use webview2_com::{
+        ContextMenuRequestedEventHandler, DownloadStartingEventHandler,
+        NewWindowRequestedEventHandler, take_pwstr,
+    };
+    use wv2_windows_core::Interface;
+
+    unsafe {
+        let _ = settings.SetIsStatusBarEnabled(false);
+        let _ = settings.SetIsZoomControlEnabled(false);
+        let _ = settings.SetIsBuiltInErrorPageEnabled(false);
+        if let Ok(settings3) = settings.cast::<ICoreWebView2Settings3>() {
+            // Debug builds keep F12 and Ctrl+Shift+I for the developer; a release build has no browser key.
+            let _ = settings3.SetAreBrowserAcceleratorKeysEnabled(cfg!(debug_assertions));
+        }
+        if let Ok(settings5) = settings.cast::<ICoreWebView2Settings5>() {
+            let _ = settings5.SetIsPinchZoomEnabled(false);
+        }
+        if let Ok(settings6) = settings.cast::<ICoreWebView2Settings6>() {
+            let _ = settings6.SetIsSwipeNavigationEnabled(false);
+        }
+
+        let new_window = NewWindowRequestedEventHandler::create(Box::new(|_, args| {
+            if let Some(args) = args {
+                let mut uri = wv2_windows_core::PWSTR::null();
+                args.Uri(&mut uri)?;
+                let target = take_pwstr(uri);
+                args.SetHandled(true)?;
+                // Only a page of someone else opens in the system browser: the address of the proxy itself never leaves the panel.
+                let own = proxy_server::get_proxy_url();
+                let outside = !own.is_empty() && !target.starts_with(own.as_str());
+                let web = target.starts_with("http://") || target.starts_with("https://");
+                if outside && web {
+                    crate::utils::open_url_in_browser(&target);
+                }
+            }
+            Ok(())
+        }));
+        let mut token = 0;
+        if let Err(error) = core_webview.add_NewWindowRequested(&new_window, &mut token) {
+            log::warn!("[{label}] new-window guard failed to attach: {error}");
+        }
+
+        // The native menu of a text field or a selection keeps the edit entries only (no Back, Reload, Save as, Print, Inspect, Search, spelling).
+        if let Ok(core11) = core_webview.cast::<ICoreWebView2_11>() {
+            let menu = ContextMenuRequestedEventHandler::create(Box::new(|_, args| {
+                if let Some(args) = args {
+                    let items = args.MenuItems()?;
+                    let mut count = 0u32;
+                    items.Count(&mut count)?;
+                    let mut removed = Vec::new();
+                    for index in (0..count).rev() {
+                        let item = items.GetValueAtIndex(index)?;
+                        let mut name = wv2_windows_core::PWSTR::null();
+                        item.Name(&mut name)?;
+                        let name = take_pwstr(name);
+                        const KEEP: [&str; 7] = [
+                            "cut",
+                            "copy",
+                            "paste",
+                            "pasteAsPlainText",
+                            "selectAll",
+                            "undo",
+                            "redo",
+                        ];
+                        if !KEEP.contains(&name.as_str()) {
+                            removed.push(name);
+                            items.RemoveValueAtIndex(index)?;
+                        }
+                    }
+                    log::debug!("[traces] context menu: removed {removed:?}");
+                }
+                Ok(())
+            }));
+            let mut token = 0;
+            if let Err(error) = core11.add_ContextMenuRequested(&menu, &mut token) {
+                log::warn!("[{label}] context menu guard failed to attach: {error}");
+            }
+        }
+
+        // A file the page sends is saved to the default place without the download bubble of the browser.
+        if let Ok(core4) = core_webview.cast::<ICoreWebView2_4>() {
+            let download = DownloadStartingEventHandler::create(Box::new(|_, args| {
+                if let Some(args) = args {
+                    args.SetHandled(true)?;
+                }
+                Ok(())
+            }));
+            let mut token = 0;
+            if let Err(error) = core4.add_DownloadStarting(&download, &mut token) {
+                log::warn!("[{label}] download guard failed to attach: {error}");
+            }
+        }
+    }
+}
+
 fn sunshine_certificate_allowed(request: &str, target: &str) -> bool {
     let (Ok(request), Ok(target)) = (url::Url::parse(request), url::Url::parse(target)) else {
         return false;
@@ -897,8 +1116,8 @@ mod certificate_tests {
             core
         ));
         assert!(super::sunshine_certificate_allowed(
-            "https://192.168.1.10:5000/",
-            "https://192.168.1.10:5000"
+            "https://192.0.2.10:5000/",
+            "https://192.0.2.10:5000"
         ));
         for request in [
             "https://localhost:47991/",
@@ -936,8 +1155,23 @@ fn refresh_webview_surface<R: Runtime>(window: &WebviewWindow<R>) {
     });
 }
 
+/// The application is going down: every window is hidden first, so none is destroyed while the person can still see it
+/// (a WebView that is gone before its window leaves a flat surface with whatever frame the window has).
+pub(crate) fn hide_all_windows<R: Runtime>(app: &AppHandle<R>) {
+    for (label, window) in app.webview_windows() {
+        info!("[close] {label}: hidden, the application exits");
+        if let Err(error) = window.hide() {
+            debug!("[exit] window {label} could not be hidden: {error}");
+        }
+    }
+}
+
 /// 处理窗口事件
 pub fn handle_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
+    // the context menu window, and the window a menu belongs to
+    if crate::ctx_popup::handle_window_event(window, event) {
+        return;
+    }
     match event {
         tauri::WindowEvent::Moved(position) => {
             if window.label() == TOOL_WINDOW_ID {
@@ -945,6 +1179,9 @@ pub fn handle_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
             }
         }
         tauri::WindowEvent::CloseRequested { .. } => {
+            if matches!(window.label(), MAIN_WINDOW_ID | DESKTOP_WINDOW_ID) {
+                closing::close_requested(window);
+            }
             match window.label() {
                 "main" => {
                     // Let the WebView close so the user agent returns to its
@@ -974,6 +1211,9 @@ pub fn handle_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
             }
         }
         tauri::WindowEvent::Destroyed => {
+            if matches!(window.label(), MAIN_WINDOW_ID | DESKTOP_WINDOW_ID) {
+                closing::destroyed(window.label());
+            }
             // 延迟重估，等窗口从 Tauri 注册表移除后再判断是否回到托盘常驻态。
             let app_handle = window.app_handle().clone();
             tauri::async_runtime::spawn(async move {

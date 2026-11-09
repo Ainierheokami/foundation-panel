@@ -45,6 +45,7 @@ mod hdr_enhanced;
 mod native_components;
 mod launch_splash;
 mod nr_overlay;
+mod panel_page;
 #[cfg(target_os = "windows")]
 mod shell_context_menu;
 mod stall_watch;
@@ -230,6 +231,8 @@ fn main() {
             system::set_desktop_dpi,
             native_tools::open_native_tool,
             commands::open_tool_window,
+            commands::open_panel_page,
+            commands::open_desktop,
             game_session::launch_game,
             game_session::get_running_game,
             game_session::stop_running_game,
@@ -379,14 +382,19 @@ fn main() {
             file_mapping::uninstall_file_mapping_menu,
             file_transfer::send_file_to_client,
             windows::webview_heartbeat,
-            windows::resize_about_window,
             logger::frontend_slow,
+            windows::panel_content_ready,
             ctx_popup::ctx_popup_loaded,
             ctx_popup::ctx_popup_open,
             ctx_popup::ctx_popup_ready,
             ctx_popup::ctx_popup_pick,
             ctx_popup::ctx_popup_cancel,
             ctx_popup::ctx_popup_selftest,
+            windows::panel_set_surface,
+            windows::panel_dpi_settled,
+            windows::panel_activity,
+            windows::panel_first_paint,
+            windows::test_synthetic_dpi,
             windows::resize_tool_window,
             hdr_enhanced::nr_live_status,
             hdr_enhanced::nr_live_set_enabled,
@@ -429,6 +437,7 @@ fn main() {
             tray::get_tray_locale,
             tray::main_panel_loading,
             tray::main_panel_ready,
+            panel_page::take_pending_panel_page,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

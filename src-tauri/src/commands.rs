@@ -1,4 +1,4 @@
-use crate::{toolbar, windows};
+use crate::windows;
 use base64::Engine as _;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -6,7 +6,7 @@ use std::sync::{
     OnceLock,
     atomic::{AtomicBool, Ordering},
 };
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use url::Url;
 
 /// Shared CDN HTTP client with connection pooling.
@@ -104,6 +104,41 @@ pub async fn toggle_dark_mode(_window: tauri::Window) -> Result<bool, String> {
     Ok(true)
 }
 
+/// The pages of the main panel that the big-screen window may ask for with a row "open in the panel". The same names as `PANEL_PAGES` in
+/// renderer/composables/panelParts.js (a test keeps the two lists equal); a name that is not here is refused before any window is touched.
+pub const PANEL_PAGES: &[&str] = &[
+    "about",
+    "pairing",
+    "logs",
+    "quality",
+    "rtss",
+    "vdd",
+    "desktop-scale",
+    "live-session",
+    "shortcuts",
+    "pet",
+    "tool-paths",
+    "file-sharing",
+    "panel-advanced",
+    "display-modes",
+    "input-drivers",
+];
+
+#[tauri::command]
+pub async fn open_panel_page(app: AppHandle, page: String) -> Result<(), String> {
+    if !PANEL_PAGES.contains(&page.as_str()) {
+        return Err(format!("Unknown panel page: {}", page));
+    }
+    info!("Opening panel page: {}", page);
+    windows::open_main_panel_page(&app, &page)
+}
+/// 打开大屏（Foundation Desktop）：已经开着就把它带到前台，不开第二个窗口。和托盘的「打开桌面 UI」是同一条路。
+#[tauri::command]
+pub async fn open_desktop(app: AppHandle) -> Result<(), String> {
+    info!("Opening the big screen from the control panel");
+    windows::open_desktop_window(&app)
+}
+
 #[tauri::command]
 pub async fn open_tool_window(app: AppHandle, tool_name: String) -> Result<(), String> {
     info!("Opening tool window: {}", tool_name);
@@ -117,7 +152,7 @@ pub async fn open_tool_window(app: AppHandle, tool_name: String) -> Result<(), S
         "vdd" => {
             if let Some(window) = app.get_webview_window("main") {
                 windows::show_and_activate_window(&window);
-                let _ = window.emit("open-vdd-settings", ());
+                crate::panel_page::open_page(&window, "vdd");
             }
         }
         "about" => {
@@ -126,10 +161,8 @@ pub async fn open_tool_window(app: AppHandle, tool_name: String) -> Result<(), S
         "logs" | "log_console" => {
             windows::open_log_console(&app);
         }
-        "nr" => toolbar::create_tool_window_internal(&app, "nr")?,
-        "performance" | "host_performance" => {
-            toolbar::create_tool_window_internal(&app, "performance")?;
-        }
+        "nr" => windows::open_main_panel_page(&app, "quality")?,
+        "performance" | "host_performance" => windows::open_main_panel_page(&app, "live-session")?,
         _ => return Err(format!("Unknown tool name: {}", tool_name)),
     }
     Ok(())

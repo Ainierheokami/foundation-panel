@@ -5,7 +5,7 @@ use log::{debug, error, warn};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 
 /// The toolbar is compact while idle and expands only for the radial menu.
 /// Keeping the idle window at the 80x80 pet size lets touch input reach the pet
@@ -441,6 +441,13 @@ pub fn handle_toolbar_menu_event<R: Runtime>(app: &AppHandle<R>, event_id: &str)
     }
 
     fn ensure_main_window<R: Runtime>(app: &AppHandle<R>) -> Option<tauri::WebviewWindow<R>> {
+        // a main window that is being closed is not shown again: the request waits for the new one
+        if windows::closing::is_closing("main") {
+            windows::closing::after_closed(app, "main", |app| {
+                ensure_main_window(&app);
+            });
+            return None;
+        }
         if let Some(window) = app.get_webview_window("main") {
             show_main_window(&window);
             Some(window)
@@ -453,40 +460,25 @@ pub fn handle_toolbar_menu_event<R: Runtime>(app: &AppHandle<R>, event_id: &str)
         }
     }
 
+    // the old tool windows of these items are pages of the main window now (renderer composables/panelParts.js); the request waits until
+    // the renderer takes it, so a main window that is only being created still opens the page (panel_page.rs)
+    fn open_panel_page<R: Runtime>(app: &AppHandle<R>, page: &str) {
+        if let Some(window) = ensure_main_window(app) {
+            crate::panel_page::open_page(&window, page);
+        }
+    }
+
     match event_id {
         "main" | "toolbar_main" => {
             ensure_main_window(app);
         }
-        "vdd" | "toolbar_vdd" => {
-            if let Some(window) = ensure_main_window(app) {
-                let _ = window.emit("open-vdd-settings", ());
-            }
-        }
-        "dpi" | "toolbar_dpi" => {
-            if let Err(e) = create_tool_window_internal(app, "dpi") {
-                error!("创建工具窗口失败: {}", e);
-            }
-        }
-        "bitrate" | "toolbar_bitrate" => {
-            if let Err(e) = create_tool_window_internal(app, "bitrate") {
-                error!("创建工具窗口失败: {}", e);
-            }
-        }
-        "performance" | "toolbar_performance" => {
-            if let Err(e) = create_tool_window_internal(app, "performance") {
-                error!("创建工具窗口失败: {}", e);
-            }
-        }
-        "shortcuts" | "toolbar_shortcuts" => {
-            if let Err(e) = create_tool_window_internal(app, "shortcuts") {
-                error!("创建工具窗口失败: {}", e);
-            }
-        }
-        "pet" | "toolbar_pet" => {
-            if let Err(e) = create_tool_window_internal(app, "pet") {
-                error!("创建工具窗口失败: {}", e);
-            }
-        }
+        "vdd" | "toolbar_vdd" => open_panel_page(app, "vdd"),
+        "dpi" | "toolbar_dpi" => open_panel_page(app, "desktop-scale"),
+        "bitrate" | "toolbar_bitrate" => open_panel_page(app, "live-session"),
+        "performance" | "toolbar_performance" => open_panel_page(app, "live-session"),
+        "rtss" | "toolbar_rtss" => open_panel_page(app, "rtss"),
+        "shortcuts" | "toolbar_shortcuts" => open_panel_page(app, "shortcuts"),
+        "pet" | "toolbar_pet" => open_panel_page(app, "pet"),
         "close" | "toolbar_close" => {
             if let Some(window) = app.get_webview_window("toolbar") {
                 let _ = window.close();
@@ -533,6 +525,8 @@ pub fn create_toolbar_window_internal<R: Runtime>(app: &AppHandle<R>) -> Result<
         Ok(win) => {
             // 在生产环境禁用右键菜单
             windows::disable_context_menu(&win);
+            #[cfg(target_os = "windows")]
+            windows::configure_webview_security(&win);
             crate::power::refresh_ecoqos_state(app);
 
             // 延迟 500ms 检查窗口尺寸（WebView2 初始化可能意外扩大窗口）。
