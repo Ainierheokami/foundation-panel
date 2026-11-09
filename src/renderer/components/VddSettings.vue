@@ -1,734 +1,186 @@
 <template>
-  <div class="vdd-settings-wrapper">
-    <div class="vdd-content">
-      <div class="vdd-page-header">
-        <div class="page-title-group">
-          <span class="page-title-icon" aria-hidden="true">
-            <el-icon><Monitor /></el-icon>
-          </span>
-          <div class="page-title-copy">
-            <h2>{{ t.vddSettings.title }}</h2>
-            <div v-if="!isDriverCheckPending && hasUnsavedChanges" class="page-header-meta">
-              <el-tag size="small" round type="warning" effect="light">
-                {{ t.vddSettings.unsavedBadge }}
-              </el-tag>
-            </div>
-          </div>
-        </div>
+  <MPage :title="pageTitle" :back="activeSection !== 'overview'" :back-label="t.m3e.back" @back="backVdd">
+    <template #actions>
+      <MIconButton v-if="!isDriverCheckPending && vddReady" icon="refresh" :label="t.vddSettings.reload" :disabled="isLoading" @click="reloadSettings" />
+    </template>
 
-        <div v-if="!isDriverCheckPending && vddReady" class="page-header-actions">
-          <el-button
-            v-for="action in heroActions"
-            :key="action.key"
-            :class="['page-header-action', `is-${action.key}`]"
-            :plain="action.plain"
-            :type="action.type"
-            :loading="action.loading"
-            @click="action.onClick"
-          >
-            <el-icon><component :is="action.icon" /></el-icon>
-            {{ action.label }}
-          </el-button>
-        </div>
+    <MBanner v-if="!isDriverCheckPending && vddReady && vddStatus.state === 'degraded'" tone="warn" icon="warning">
+      <b>{{ vddStatusLabel }}</b><br>{{ vddStatus.status_text }}
+      <template #actions><MButton variant="text" size="sm" icon="download" :loading="isInstallingDriver" @click="installOrRepairDriver">{{ t.vddSettings.installRepairDriver }}</MButton></template>
+    </MBanner>
+
+    <!-- opening the page: the one loading state, nothing else (no wave, no explaining rows) -->
+    <MPageLoading v-if="isDriverCheckPending && openingCheck" :rows="5" />
+
+    <!-- Driver check (asked for: 重新检测, installing) -->
+    <template v-else-if="isDriverCheckPending">
+      <MStatusPill icon="sync" :label="driverDetectionTitle" :action="false" />
+      <MProgress :label="driverDetectionTitle" />
+      <MGroup>
+        <MCheckItem :title="t.vddSettings.driverDetectionPresence" :state="driverCheckPhase === 'syncing' ? 'ok' : 'pending'" />
+        <MCheckItem :title="t.vddSettings.driverDetectionHealth" :state="driverCheckPhase === 'syncing' ? 'ok' : 'pending'" />
+        <MCheckItem :title="t.vddSettings.driverDetectionVersion" :state="driverCheckPhase === 'syncing' ? 'ok' : 'pending'" />
+      </MGroup>
+      <MFooter>{{ driverDetectionDescription }} {{ t.vddSettings.driverDetectionLocked }}</MFooter>
+    </template>
+
+    <!-- Driver missing or unhealthy -->
+    <template v-else-if="!vddReady">
+      <MStatusPill icon="desktop_windows" tone="warn" :label="vddStatusLabel || t.vddSettings.driverStatusUnknown" :action="false" />
+      <MGroup>
+        <MItem icon="info" :title="t.vddSettings.driverPrerequisiteTitle" :text="vddStatus.status_text || t.vddSettings.driverStatusUnknown" />
+        <MItem v-if="vddStatus.installed_version || vddStatus.bundled_version" icon="memory" :title="t.vddSettings.driverVersionInstalled" :value="vddStatus.installed_version || '—'">
+          <template #trail><span class="m-item__count">{{ t.vddSettings.driverVersionBundled }} {{ vddStatus.bundled_version || '—' }}</span></template>
+        </MItem>
+      </MGroup>
+      <MFooter>{{ t.vddSettings.driverPrerequisiteDesc }}</MFooter>
+      <div class="m-actions-row">
+        <MButton v-if="vddCanInstall" icon="download" :loading="isInstallingDriver" @click="installOrRepairDriver">{{ t.vddSettings.installRepairDriver }}</MButton>
+        <MButton variant="tonal" icon="refresh" :loading="isCheckingDriver" @click="recheckDriver">{{ t.vddSettings.recheckDriver }}</MButton>
       </div>
+      <MProgress v-if="isInstallingDriver" class="vdd-installing" :label="t.vddSettings.installingDriver" />
+    </template>
 
-      <div
-        v-if="!isDriverCheckPending && vddReady && vddStatus.state === 'degraded'"
-        class="degraded-driver-notice"
-        role="status"
-        aria-live="polite"
-      >
-        <span class="degraded-driver-icon" aria-hidden="true">!</span>
-        <div class="degraded-driver-copy">
-          <strong>{{ vddStatusLabel }}</strong>
-          <span>{{ vddStatus.status_text }}</span>
-        </div>
-        <el-button class="driver-repair-action" type="warning" text :loading="isInstallingDriver" @click="installOrRepairDriver">
-          <el-icon><Download /></el-icon>
-          {{ t.vddSettings.installRepairDriver }}
-        </el-button>
-      </div>
-
-      <section
-        v-if="isDriverCheckPending"
-        class="section-card driver-detection-card"
-        role="status"
-        aria-live="polite"
-        aria-busy="true"
-        aria-labelledby="driver-detection-title"
-      >
-        <div class="detection-core" aria-hidden="true">
-          <span class="detection-orbit"></span>
-          <span class="detection-core-icon"><el-icon><Monitor /></el-icon></span>
-        </div>
-
-        <div class="detection-copy">
-          <span class="detection-kicker">{{ t.vddSettings.driverDetectionKicker }}</span>
-          <h3 id="driver-detection-title">{{ driverDetectionTitle }}</h3>
-          <p>{{ driverDetectionDescription }}</p>
-        </div>
-
-        <div class="detection-checks">
-          <span :class="{ 'is-complete': driverCheckPhase === 'syncing' }">
-            <i aria-hidden="true"></i>{{ t.vddSettings.driverDetectionPresence }}
-          </span>
-          <span :class="{ 'is-complete': driverCheckPhase === 'syncing' }">
-            <i aria-hidden="true"></i>{{ t.vddSettings.driverDetectionHealth }}
-          </span>
-          <span :class="{ 'is-complete': driverCheckPhase === 'syncing' }">
-            <i aria-hidden="true"></i>{{ t.vddSettings.driverDetectionVersion }}
-          </span>
-        </div>
-
-        <div class="detection-lock">
-          <span aria-hidden="true">◇</span>
-          {{ t.vddSettings.driverDetectionLocked }}
-        </div>
-      </section>
-
-      <section v-else-if="!vddReady" class="section-card vdd-prerequisite-card" aria-labelledby="vdd-prerequisite-title">
-        <div class="prerequisite-intro">
-          <div class="prerequisite-icon" aria-hidden="true">
-            <el-icon><Monitor /></el-icon>
-          </div>
-          <div class="prerequisite-copy">
-            <h3 id="vdd-prerequisite-title">{{ t.vddSettings.driverPrerequisiteTitle }}</h3>
-            <p>{{ t.vddSettings.driverPrerequisiteDesc }}</p>
-          </div>
-        </div>
-
-        <div class="prerequisite-status" role="status" aria-live="polite">
-          <span class="status-dot" aria-hidden="true"></span>
-          <div class="status-copy">
-            <strong>{{ vddStatusLabel }}</strong>
-            <span>{{ vddStatus.status_text || t.vddSettings.driverStatusUnknown }}</span>
-            <div v-if="vddStatus.installed_version || vddStatus.bundled_version" class="driver-version-meta">
-              <span>{{ t.vddSettings.driverVersionInstalled }}: {{ vddStatus.installed_version || '—' }}</span>
-              <span>{{ t.vddSettings.driverVersionBundled }}: {{ vddStatus.bundled_version || '—' }}</span>
-            </div>
-          </div>
-        </div>
-
-        <div class="prerequisite-actions">
-          <el-button v-if="vddCanInstall" type="primary" :loading="isInstallingDriver" @click="installOrRepairDriver">
-            <el-icon><Download /></el-icon>
-            {{ t.vddSettings.installRepairDriver }}
-          </el-button>
-          <el-button :loading="isCheckingDriver" @click="recheckDriver">
-            <el-icon><Refresh /></el-icon>
-            {{ t.vddSettings.recheckDriver }}
-          </el-button>
-        </div>
-      </section>
-
-      <template v-if="!isDriverCheckPending && vddReady">
-      <div class="vdd-section-tabs" role="tablist" :aria-label="t.vddSettings.title">
-        <button
-          v-for="tab in sectionTabs"
-          :key="tab.key"
-          :id="`vdd-tab-${tab.key}`"
-          type="button"
-          role="tab"
-          :aria-controls="`vdd-panel-${tab.key}`"
-          :aria-selected="activeSection === tab.key"
-          :tabindex="activeSection === tab.key ? 0 : -1"
-          :class="['vdd-section-tab', { active: activeSection === tab.key }]"
-          @click="activeSection = tab.key"
-          @keydown.left.prevent="focusAdjacentSection(tab.key, -1)"
-          @keydown.right.prevent="focusAdjacentSection(tab.key, 1)"
-          @keydown.home.prevent="focusSectionByIndex(0)"
-          @keydown.end.prevent="focusSectionByIndex(sectionTabs.length - 1)"
-        >
-          <el-icon><component :is="tab.icon" /></el-icon>
-          {{ tab.label }}
-        </button>
-      </div>
-
-      <section
-        v-show="activeSection === 'overview'"
-        id="vdd-panel-overview"
-        role="tabpanel"
-        aria-labelledby="vdd-tab-overview"
-        class="hero-panel overview-panel"
-      >
-        <div class="vdd-header">
-          <div class="header-copy">
-            <p class="header-subtitle">{{ t.vddSettings.subtitle }}</p>
-            <div class="cert-badges" aria-label="VDD capability badges">
-              <div v-for="badge in capabilityBadges" :key="badge.key" :class="['cert-badge', badge.tone]">
-                <span class="cert-text">{{ badge.text }}</span>
-                <span class="cert-sub">{{ badge.sub }}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="overview-grid">
-          <div v-for="card in overviewCards" :key="card.key" class="overview-card">
-            <span class="overview-label">{{ card.label }}</span>
-            <strong class="overview-value">{{ card.value }}</strong>
-            <span v-if="card.hint" class="overview-hint">{{ card.hint }}</span>
-          </div>
-        </div>
-
-        <div class="overview-calibration-callout">
-          <span class="overview-calibration-icon" aria-hidden="true">
-            <el-icon><CircleCheck v-if="calibrationStatus.calibrated" /><Warning v-else /></el-icon>
-          </span>
-          <div class="overview-calibration-copy">
-            <h3>{{ t.vddSettings.calibrationTitle }}</h3>
-            <p>{{ calibrationStatusDescription }}</p>
-          </div>
-          <el-button @click="activeSection = 'calibration'">
-            {{ t.vddSettings.calibrationTitle }}
-          </el-button>
-        </div>
-      </section>
-
-      <section
-        v-show="activeSection === 'calibration'"
-        id="vdd-panel-calibration"
-        role="tabpanel"
-        aria-labelledby="vdd-tab-calibration"
-        class="section-card calibration-card"
-      >
-        <div class="section-header calibration-header">
-          <div>
-            <h3 id="vdd-calibration-title">{{ t.vddSettings.calibrationTitle }}</h3>
-            <p>{{ t.vddSettings.calibrationHint }}</p>
-          </div>
-          <el-button :loading="isRefreshingCalibration" @click="loadCalibrationContext">
-            <el-icon><Refresh /></el-icon>
-            {{ t.vddSettings.calibrationRefresh }}
-          </el-button>
-        </div>
-
-        <div
-          :class="['calibration-status', calibrationStatusTone]"
-          role="status"
-          aria-live="polite"
-        >
-          <span class="calibration-status-icon" aria-hidden="true">
-            <el-icon><CircleCheck v-if="calibrationStatus.calibrated" /><Warning v-else /></el-icon>
-          </span>
-          <div class="calibration-status-copy">
-            <strong>{{ calibrationStatusTitle }}</strong>
-            <span>{{ calibrationStatusDescription }}</span>
-            <span v-if="calibrationStatus.profileName" class="calibration-profile-name">
-              {{ calibrationStatus.profileName }}
-            </span>
-          </div>
-        </div>
-
-        <div v-if="calibrationStatus.calibrated" class="calibration-values">
-          <div>
-            <span>{{ t.vddSettings.calibrationPeak }}</span>
-            <strong>{{ formatCalibrationNits(calibrationStatus.maxNits) }}</strong>
-          </div>
-          <div>
-            <span>{{ t.vddSettings.calibrationMinimum }}</span>
-            <strong>{{ formatCalibrationNits(calibrationStatus.minNits) }}</strong>
-          </div>
-          <div>
-            <span>{{ t.vddSettings.calibrationFullFrame }}</span>
-            <strong>{{ formatCalibrationNits(calibrationStatus.maxFullFrameNits) }}</strong>
-          </div>
-        </div>
-
-        <div class="calibration-workflow">
-          <div class="calibration-client-row">
-            <div class="calibration-client-copy">
-              <strong>{{ t.vddSettings.calibrationClient }}</strong>
-              <span>{{ t.vddSettings.calibrationClientHint }}</span>
-            </div>
-            <div :class="['calibration-client-value', { empty: !activeCalibrationClient }]">
-              <el-icon><Monitor /></el-icon>
-              <span>{{ activeCalibrationClient?.name || t.vddSettings.calibrationNoActiveClient }}</span>
-            </div>
-          </div>
-
-          <ol class="calibration-steps">
-            <li :class="{ complete: hasActiveHdrClient }">
-              <span>1</span><div><strong>{{ t.vddSettings.calibrationStepStream }}</strong><small>{{ t.vddSettings.calibrationStepStreamHint }}</small></div>
-            </li>
-            <li :class="{ complete: calibrationStatus.vddActive && calibrationStatus.hdrEnabled }">
-              <span>2</span><div><strong>{{ t.vddSettings.calibrationStepVdd }}</strong><small>{{ t.vddSettings.calibrationStepVddHint }}</small></div>
-            </li>
-            <li :class="{ complete: calibrationStatus.calibrated }">
-              <span>3</span><div><strong>{{ t.vddSettings.calibrationStepRun }}</strong><small>{{ t.vddSettings.calibrationStepRunHint }}</small></div>
-            </li>
-          </ol>
-
-          <div v-if="vddReuseEnabled" class="calibration-warning">
-            <el-icon><Warning /></el-icon>
-            <span>{{ t.vddSettings.calibrationSharedWarning }}</span>
-          </div>
-
-          <div class="calibration-actions">
-            <el-button
-              type="primary"
-              :disabled="!calibrationStatus.canCalibrate"
-              :loading="isLaunchingCalibration"
-              @click="launchHdrCalibration"
-            >
-              <el-icon><VideoPlay /></el-icon>
-              {{ calibrationStatus.calibrated ? t.vddSettings.calibrationRunAgain : t.vddSettings.calibrationLaunch }}
-            </el-button>
-            <el-button v-if="calibrationStatus.state === 'unbound_profile'"
-              :disabled="!calibrationStatus.canCalibrate" :loading="isSavingCalibration" @click="bindHdrCalibration">
-              {{ t.vddSettings.calibrationUseExisting }}
-            </el-button>
-            <el-button @click="openHdrCalibrationStore">
-              <el-icon><Download /></el-icon>
-              {{ t.vddSettings.calibrationInstall }}
-            </el-button>
-          </div>
-
-          <div class="physical-calibration-panel">
-            <div class="physical-calibration-copy">
-              <strong>{{ t.vddSettings.physicalCalibrationTitle }}</strong>
-              <span>{{ t.vddSettings.physicalCalibrationHint }}</span>
-            </div>
-            <el-button :loading="isLaunchingPhysicalCalibration" @click="launchPhysicalHdrCalibration">
-              <el-icon><Sunny /></el-icon>
-              {{ t.vddSettings.physicalCalibrationLaunch }}
-            </el-button>
-          </div>
-        </div>
-      </section>
-
-      <el-form
-        v-if="activeSection === 'display' || activeSection === 'driver'"
-        :model="settings"
-        label-position="top"
-        size="default"
-        class="vdd-form"
-      >
-        <div
-          :id="`vdd-panel-${activeSection}`"
-          role="tabpanel"
-          :aria-labelledby="`vdd-tab-${activeSection}`"
-          :class="['form-layout', `is-${activeSection}`]"
-        >
-          <div v-if="activeSection === 'display'" class="form-main">
-            <div class="section-card">
-              <div class="section-header">
-                <h3>{{ t.vddSettings.displaySection }}</h3>
-                <p>{{ t.vddSettings.displaySectionHint }}</p>
-              </div>
-
-              <el-form-item :label="t.vddSettings.resolutionPresets">
-                <div class="setting-content">
-                  <el-tag
-                    v-for="res in sortedResolutionOptions"
-                    :key="res"
-                    closable
-                    @close="removeResolution(res)"
-                    class="resolution-tag"
-                    type="info"
-                  >
-                    {{ res }}
-                  </el-tag>
-                  <el-input
-                    v-if="showResInput"
-                    ref="resInputRef"
-                    v-model="newResolution"
-                    class="input-new-tag"
-                    @keyup.enter="addResolution"
-                    @blur="handleResInputConfirm"
-                    size="small"
-                    :placeholder="t.vddSettings.resPlaceholder"
-                    style="width: 140px"
-                  />
-                  <el-button v-else size="small" @click="showResolutionInput" class="add-btn">
-                    <el-icon><Plus /></el-icon>
-                    {{ t.vddSettings.addResolution }}
-                  </el-button>
-                </div>
-              </el-form-item>
-
-              <el-form-item :label="t.vddSettings.suggestedResolutions">
-                <div class="preset-buttons">
-                  <el-button
-                    v-for="resolution in suggestedResolutions"
-                    :key="resolution"
-                    size="small"
-                    plain
-                    :disabled="resolutionOptions.has(resolution)"
-                    @click="quickAddResolution(resolution)"
-                  >
-                    {{ resolution }}
-                  </el-button>
-                </div>
-              </el-form-item>
-
-              <el-form-item :label="t.vddSettings.gpuBinding">
-                <div class="setting-content full-width">
-                  <el-select
-                    v-model="gpuFriendlyName"
-                    filterable
-                    allow-create
-                    default-first-option
-                    style="width: 100%; max-width: 420px"
-                    :placeholder="t.vddSettings.gpuPlaceholder"
-                    @blur="saveGpuEdit"
-                    @keyup.enter="saveGpuEdit"
-                  >
-                    <el-option v-for="gpu in gpuOptions" :key="gpu" :label="gpu" :value="gpu" />
-                  </el-select>
-                </div>
-              </el-form-item>
-
-              <el-form-item :label="t.vddSettings.monitorCount">
-                <div class="field-stack">
-                  <el-input-number v-model="settings.monitors.count" :min="1" :max="1" disabled />
-                  <span class="form-tip">{{ t.vddSettings.monitorCountTip }}</span>
-                </div>
-              </el-form-item>
-
-              <el-form-item :label="t.vddSettings.refreshRatePresets">
-                <div class="setting-content">
-                  <el-tag
-                    v-for="rate in sortedRefreshRateOptions"
-                    :key="rate"
-                    closable
-                    @close="removeRefreshRate(rate)"
-                    class="rate-tag"
-                    type="success"
-                  >
-                    {{ rate }}Hz
-                  </el-tag>
-                  <el-input
-                    v-if="showRateInput"
-                    ref="rateInputRef"
-                    v-model="newRefreshRate"
-                    class="input-new-tag"
-                    @keyup.enter="addRefreshRate"
-                    @blur="handleRateInputConfirm"
-                    size="small"
-                    :placeholder="t.vddSettings.ratePlaceholder"
-                    style="width: 120px"
-                  />
-                  <el-button v-else size="small" @click="showRefreshRateInput" class="add-btn">
-                    <el-icon><Plus /></el-icon>
-                    {{ t.vddSettings.addRefreshRate }}
-                  </el-button>
-                </div>
-              </el-form-item>
-
-              <el-form-item :label="t.vddSettings.suggestedRefreshRates">
-                <div class="preset-buttons">
-                  <el-button
-                    v-for="rate in suggestedRefreshRates"
-                    :key="rate"
-                    size="small"
-                    plain
-                    :disabled="refreshRateOptions.has(rate)"
-                    @click="quickAddRefreshRate(rate)"
-                  >
-                    {{ rate }}Hz
-                  </el-button>
-                </div>
-              </el-form-item>
-
-              <el-form-item :label="t.vddSettings.vrr">
-                <div class="field-stack">
-                  <div class="field-inline-control">
-                    <el-switch v-model="settings.edid.Vrr" />
-                  </div>
-                  <span class="form-tip">{{ t.vddSettings.vrrTip }}</span>
-                </div>
-              </el-form-item>
-            </div>
-
-            <div class="section-card">
-              <div class="section-header">
-                <h3>{{ t.vddSettings.qualitySection }}</h3>
-                <p>{{ t.vddSettings.qualitySectionHint }}</p>
-              </div>
-
-              <div class="two-column-layout">
-                <el-form-item :label="t.vddSettings.colorDepthProfile" class="span-two">
-                  <div class="field-stack">
-                    <el-radio-group v-model="colorDepthProfile" class="color-depth-group">
-                      <el-radio-button :label="COLOR_DEPTH_DEFAULT">
-                        {{ t.vddSettings.colorDepthDefault }}
-                      </el-radio-button>
-                      <el-radio-button :label="COLOR_DEPTH_SDR10">
-                        {{ t.vddSettings.sdr10bit }}
-                      </el-radio-button>
-                      <el-radio-button :label="COLOR_DEPTH_HDR12">
-                        {{ t.vddSettings.hdr12bit }}
-                      </el-radio-button>
-                      <el-radio-button
-                        v-if="isColorDepthConflict"
-                        :label="COLOR_DEPTH_CONFLICT"
-                        disabled
-                      >
-                        {{ t.vddSettings.colorDepthConflict }}
-                      </el-radio-button>
-                    </el-radio-group>
-                    <span class="form-tip">{{ t.vddSettings.colorDepthMutualExclusiveTip }}</span>
-                    <el-alert
-                      v-if="isColorDepthConflict"
-                      type="warning"
-                      show-icon
-                      :closable="false"
-                      class="inline-alert"
-                    >
-                      {{ t.vddSettings.colorDepthConflictTip }}
-                    </el-alert>
-                  </div>
-                </el-form-item>
-
-                <el-form-item :label="t.vddSettings.colorMode">
-                  <div class="field-stack">
-                    <el-select
-                      v-model="settings.colour.ColourFormat"
-                      :placeholder="t.vddSettings.selectColorMode"
-                      style="width: 220px"
-                    >
-                      <el-option label="RGB" value="RGB" />
-                      <el-option label="YCbCr444" value="YCbCr444" />
-                      <el-option label="YCbCr422" value="YCbCr422" />
-                      <el-option label="YCbCr420" value="YCbCr420" />
-                    </el-select>
-                  </div>
-                </el-form-item>
-
-                <el-form-item :label="t.vddSettings.hardwareCursor">
-                  <div class="field-stack">
-                    <div class="field-inline-control">
-                      <el-switch v-model="settings.cursor.HardwareCursor" disabled />
-                    </div>
-                    <span class="form-tip">{{ t.vddSettings.hardwareCursorTip }}</span>
-                  </div>
-                </el-form-item>
-
-              </div>
-            </div>
-          </div>
-
-          <div v-if="activeSection === 'driver'" class="form-side">
-            <div class="section-card utility-card">
-              <div class="section-header">
-                <h3>{{ t.vddSettings.driverTools }}</h3>
-                <p>{{ t.vddSettings.driverToolsHint }}</p>
-              </div>
-
-              <div class="action-strip">
-                <el-button @click="reloadDriver" :loading="isReloadingDriver">
-                  <el-icon><Refresh /></el-icon>
-                  {{ t.vddSettings.reloadDriver }}
-                </el-button>
-              </div>
-
-              <div v-if="edidFileExists" class="danger-zone">
-                <div class="danger-zone-header">
-                  <el-tag type="danger" effect="light" round>{{ t.vddSettings.dangerZone }}</el-tag>
-                  <span class="danger-zone-desc">{{ t.vddSettings.dangerZoneHint }}</span>
-                </div>
-
-                <el-button
-                  plain
-                  type="danger"
-                  class="danger-action"
-                  @click="removeEdidFile"
-                  :loading="isDeletingEdid"
-                >
-                  <el-icon><Delete /></el-icon>
-                  {{ t.vddSettings.deleteEdid }}
-                </el-button>
-              </div>
-            </div>
-
-            <div class="section-card trace-card">
-              <div class="section-header">
-                <h3>{{ t.vddSettings.vddTraceTitle }}</h3>
-                <p>{{ t.vddSettings.vddTraceHint }}</p>
-              </div>
-
-              <div class="trace-status">
-                <el-tag :type="traceStatus.running ? 'success' : 'info'" effect="light" round>
-                  {{ traceStatus.running ? t.vddSettings.vddTraceRunning : t.vddSettings.vddTraceIdle }}
-                </el-tag>
-                <span class="trace-path" :title="traceDisplayPath">{{ traceDisplayPath }}</span>
-              </div>
-
-              <p class="form-tip trace-admin-tip">{{ t.vddSettings.vddTraceAdminHint }}</p>
-
-              <div class="action-strip trace-actions">
-                <el-button
-                  type="primary"
-                  :loading="isStartingTrace"
-                  :disabled="traceStatus.running || isStoppingTrace"
-                  @click="startTrace"
-                >
-                  <el-icon><VideoPlay /></el-icon>
-                  {{ t.vddSettings.vddTraceStart }}
-                </el-button>
-                <el-button
-                  :loading="isStoppingTrace"
-                  :disabled="!traceStatus.running || isStartingTrace"
-                  @click="stopTrace"
-                >
-                  <el-icon><VideoPause /></el-icon>
-                  {{ t.vddSettings.vddTraceStop }}
-                </el-button>
-                <el-button
-                  :loading="isOpeningTraceFolder"
-                  :disabled="!traceStatus.directory"
-                  @click="openTraceFolder"
-                >
-                  <el-icon><FolderOpened /></el-icon>
-                  {{ t.vddSettings.vddTraceOpenFolder }}
-                </el-button>
-              </div>
-            </div>
-
-            <div class="section-card">
-              <div class="section-header">
-                <h3>{{ t.vddSettings.edidSection }}</h3>
-                <p>{{ t.vddSettings.edidSectionHint }}</p>
-              </div>
-
-              <el-form-item :label="t.vddSettings.dolbyVision">
-                <div class="field-stack">
-                  <div class="field-inline-control">
-                    <el-switch
-                      v-model="settings.edid.DolbyVision"
-                      :disabled="settings.edid.CustomEdid && !settings.edid.EdidCeaOverride"
-                      :aria-label="t.vddSettings.dolbyVision"
-                    />
-                  </div>
-                  <span class="form-tip">
-                    {{ settings.edid.CustomEdid && !settings.edid.EdidCeaOverride
-                      ? t.vddSettings.dolbyVisionCustomEdidTip
-                      : t.vddSettings.dolbyVisionTip }}
-                  </span>
-                </div>
-              </el-form-item>
-
-              <el-form-item :label="t.vddSettings.customEdid">
-                <div class="field-stack">
-                  <div class="field-inline-control">
-                    <el-switch v-model="settings.edid.CustomEdid" @change="handleEdidToggle" />
-                  </div>
-                  <span class="form-tip">{{ t.vddSettings.customEdidTip }}</span>
-                </div>
-              </el-form-item>
-
-              <el-alert
-                v-if="hasCustomEdidIssue"
-                type="warning"
-                show-icon
-                :closable="false"
-                class="inline-alert"
-              >
-                {{ t.vddSettings.customEdidMissingInline }}
-              </el-alert>
-
-              <el-form-item :label="t.vddSettings.edidFile" v-if="settings.edid.CustomEdid">
-                <div class="edid-file-manager">
-                  <el-alert type="warning" :closable="false" show-icon class="edid-warning">
-                    <template #title>
-                      <span class="warning-text">{{ t.vddSettings.edidWarning }}</span>
-                    </template>
-                  </el-alert>
-
-                  <div class="edid-status">
-                    <el-tag :type="edidFileExists ? 'success' : 'info'" effect="dark">
-                      {{ edidFileExists ? t.vddSettings.edidUploaded : t.vddSettings.edidNotUploaded }}
-                    </el-tag>
-                    <span class="edid-path" v-if="edidFilePath">{{ edidFilePath }}</span>
-                  </div>
-
-                  <div class="edid-actions">
-                    <el-upload
-                      :auto-upload="false"
-                      :show-file-list="false"
-                      :on-change="handleEdidFileChange"
-                      accept=".bin"
-                    >
-                      <el-button size="small" type="primary">
-                        <el-icon><Upload /></el-icon>
-                        {{ t.vddSettings.edidSelectFile }}
-                      </el-button>
-                    </el-upload>
-
-                    <el-button size="small" @click="downloadEdid" :disabled="!edidFileExists">
-                      <el-icon><Download /></el-icon>
-                      {{ t.vddSettings.edidDownload }}
-                    </el-button>
-                  </div>
-
-                  <div class="edid-info" v-if="edidInfo">
-                    <el-descriptions :column="2" size="small" border>
-                      <el-descriptions-item :label="t.vddSettings.edidFileSize">
-                        {{ edidInfo.size }} {{ t.vddSettings.edidBytes }}
-                      </el-descriptions-item>
-                      <el-descriptions-item :label="t.vddSettings.edidFormat">
-                        {{ getEdidFormatLabel(edidInfo.size) }}
-                      </el-descriptions-item>
-                      <el-descriptions-item label="Checksum" :span="2">
-                        <el-tag :type="edidInfo.checksumValid ? 'success' : 'danger'" size="small">
-                          {{ edidInfo.checksumValid ? t.vddSettings.edidChecksumValid : t.vddSettings.edidChecksumInvalid }}
-                        </el-tag>
-                      </el-descriptions-item>
-                    </el-descriptions>
-                  </div>
-                </div>
-              </el-form-item>
-            </div>
-          </div>
-        </div>
-      </el-form>
+    <template v-else>
+      <!-- Overview: the device card, then the way to the settings that belong to the display; nothing here is a second copy of a setting (modes, calibration and scaling live on their own pages) -->
+      <template v-if="activeSection === 'overview'">
+        <MBanner v-if="hostVdd.store.error.value" tone="error" icon="error">{{ vp.saveFailed.replace('{error}', hostVdd.store.error.value) }}</MBanner>
+        <MSection :title="dt.sections.virtual.device">
+          <MVddDevice
+            v-model:keep="keepModel" data-cfg="vdd_keep_enabled" :state="deviceState" :installed-version="vddStatus.installed_version || ''" :bundled-version="vddStatus.bundled_version || ''"
+            :active="hostVdd.store.summary.value.active" :busy="isInstallingDriver || isCreatingNow" :can-install="vddCanInstall" :can-keep="hostVdd.store.canSaveProtected" :keep-busy="!!hostVdd.store.busy.vdd_keep_enabled"
+            :status-text="vddStatus.status_text || ''" :locale="locale" @install="installOrRepairDriver" @recheck="recheckDriver" @create="trayVdd('vdd_create')" @close="trayVdd('vdd_destroy')"
+          />
+          <MGroup>
+            <MSwitchItem v-model="headlessModel" icon="desktop_access_disabled" :title="dt.device.headless" :text="hostVdd.store.canSaveProtected ? '' : vt.trayOnly" :disabled="!hostVdd.store.canSaveProtected || hostVdd.store.busy.vdd_headless_create" />
+            <MSwitchItem v-model="reuseModel" data-cfg="vdd_reuse" icon="devices" :title="dt.device.reuse" :text="dt.device.reuseText" :disabled="hostVdd.store.busy.vdd_reuse" />
+          </MGroup>
+        </MSection>
+        <MSection :title="dt.sections.virtual.links">
+          <MGroup>
+            <MItem action icon="aspect_ratio" :title="dt.device.links.modes" @click="emit('webui-navigate', '/config#tab=display&sub=modes')" />
+            <MItem action icon="hdr_on" :title="dt.device.links.calibration" @click="emit('webui-navigate', '/config#tab=display&sub=hdr')" />
+            <MItem action icon="format_size" :title="dt.device.links.scaling" @click="emit('webui-navigate', '/config#tab=display&sub=output')" />
+          </MGroup>
+        </MSection>
+        <MExpander v-model:open="driverOpen" :title="vp.driverTitle" icon="build">
+          <MGroup>
+            <MItem action icon="monitor" :title="t.vddSettings.tabDisplay" :text="displaySummary" @click="activeSection = 'display'" />
+            <MItem action icon="palette" :title="vp.qualityTitle" :text="qualitySummary" @click="activeSection = 'quality'" />
+            <MItem action icon="build" :title="vp.driverTitle" :text="vp.tier3" @click="activeSection = 'driver'" />
+          </MGroup>
+        </MExpander>
       </template>
-    </div>
-  </div>
+
+      <!-- Display: resolutions, refresh rates, GPU, colour -->
+      <template v-else-if="activeSection === 'display'">
+        <MSection :title="t.vddSettings.displaySection">
+          <MGroup>
+            <MValueItem v-if="!gpuOptions.length" :model-value="gpuFriendlyName" :label="t.vddSettings.gpuBinding" :placeholder="t.vddSettings.gpuPlaceholder" :ok-label="t.common.confirm" :cancel-label="t.common.cancel" @update:model-value="(v) => { gpuFriendlyName = v; saveGpuEdit() }" />
+            <MChoiceItem v-if="gpuOptions.length" :model-value="gpuFriendlyName" icon="developer_board" :title="t.vddSettings.gpuBinding" :options="gpuOptions.map((g) => ({ value: g, label: g }))" :cancel-label="t.common.cancel" @update:model-value="(v) => { gpuFriendlyName = v; saveGpuEdit() }" />
+            <MItem icon="monitor" :title="t.vddSettings.monitorCount" :text="t.vddSettings.monitorCountTip" :value="String(settings.monitors.count)" />
+            <MSwitchItem v-model="settings.edid.Vrr" icon="sync" :title="t.vddSettings.vrr" :text="t.vddSettings.vrrTip" />
+          </MGroup>
+        </MSection>
+      </template>
+
+      <!-- Quality: colour depth, colour mode, cursor -->
+      <template v-else-if="activeSection === 'quality'">
+        <MSection :title="vp.qualityTitle">
+          <MGroup>
+            <MItem icon="hdr_on" :title="t.vddSettings.colorDepthProfile" :text="t.vddSettings.colorDepthMutualExclusiveTip" stack>
+              <template #control>
+                <MSeg v-model="colorDepthProfile" block :label="t.vddSettings.colorDepthProfile" :options="colorDepthOptions" />
+              </template>
+            </MItem>
+            <MChoiceItem v-model="settings.colour.ColourFormat" icon="palette" :title="t.vddSettings.colorMode" :options="['RGB', 'YCbCr444', 'YCbCr422', 'YCbCr420'].map((v) => ({ value: v, label: v }))" :cancel-label="t.common.cancel" />
+            <MSwitchItem v-model="settings.cursor.HardwareCursor" icon="mouse" :title="t.vddSettings.hardwareCursor" :text="t.vddSettings.hardwareCursorTip" disabled />
+          </MGroup>
+          <MBanner v-if="isColorDepthConflict" tone="warn" icon="warning">{{ t.vddSettings.colorDepthConflictTip }}</MBanner>
+        </MSection>
+      </template>
+
+      <!-- Driver: tools, trace, EDID -->
+      <template v-else-if="activeSection === 'driver'">
+        <MSection :title="t.vddSettings.driverTools">
+          <MGroup>
+            <MItem action icon="refresh" :title="t.vddSettings.reloadDriver" :disabled="isReloadingDriver" @click="confirmThen('reload', t.vddSettings.reloadDriver, reloadDriver)" />
+            <MItem v-if="edidFileExists" action icon="delete" :title="t.vddSettings.deleteEdid" :text="t.vddSettings.dangerZoneHint" :disabled="isDeletingEdid" @click="removeEdidFile" />
+          </MGroup>
+          <MFooter>{{ t.vddSettings.driverToolsHint }}</MFooter>
+        </MSection>
+        <MSection :title="t.vddSettings.vddTraceTitle">
+          <MGroup>
+            <MItem icon="monitor_heart" :title="traceStatus.running ? t.vddSettings.vddTraceRunning : t.vddSettings.vddTraceIdle" :text="traceDisplayPath" />
+            <MItem action icon="play_arrow" :title="t.vddSettings.vddTraceStart" :disabled="traceStatus.running || isStartingTrace || isStoppingTrace" @click="startTrace" />
+            <MItem action icon="stop" :title="t.vddSettings.vddTraceStop" :disabled="!traceStatus.running || isStartingTrace || isStoppingTrace" @click="stopTrace" />
+            <MItem action icon="folder_open" :title="t.vddSettings.vddTraceOpenFolder" :disabled="!traceStatus.directory || isOpeningTraceFolder" @click="openTraceFolder" />
+          </MGroup>
+          <MFooter>{{ t.vddSettings.vddTraceHint }} {{ t.vddSettings.vddTraceAdminHint }}</MFooter>
+        </MSection>
+        <MSection :title="t.vddSettings.edidSection">
+          <MGroup>
+            <MChoiceItem :model-value="settings.edid.EdidProfile" icon="tune" :title="vp.edidProfile" :text="settings.edid.CustomEdid ? vp.edidProfileIgnored : `${vp.edidProfiles[settings.edid.EdidProfile]?.text || ''}. ${vp.edidProfileText}`" :options="edidProfileOptions" :disabled="settings.edid.CustomEdid" :cancel-label="t.common.cancel" data-cfg="EdidProfile" @update:model-value="(v) => confirmThen('edidProfile', vp.edidProfile, () => (settings.edid.EdidProfile = v))" />
+            <MSwitchItem :model-value="settings.edid.DolbyVision" icon="hdr_on" :title="t.vddSettings.dolbyVision" :text="settings.edid.CustomEdid && !settings.edid.EdidCeaOverride ? t.vddSettings.dolbyVisionCustomEdidTip : t.vddSettings.dolbyVisionTip" :disabled="settings.edid.CustomEdid && !settings.edid.EdidCeaOverride" @update:model-value="(v) => confirmThen('dolby', t.vddSettings.dolbyVision, () => (settings.edid.DolbyVision = v))" />
+            <MSwitchItem :model-value="settings.edid.CustomEdid" icon="description" :title="t.vddSettings.customEdid" :text="t.vddSettings.customEdidTip" @update:model-value="(v) => confirmThen('customEdid', t.vddSettings.customEdid, () => { settings.edid.CustomEdid = v; handleEdidToggle(v) })" />
+            <template v-if="settings.edid.CustomEdid">
+              <MSwitchItem v-model="settings.edid.PreventSpoof" icon="verified_user" :title="vp.preventSpoof" :text="vp.preventSpoofText" data-cfg="PreventSpoof" />
+              <MSwitchItem v-model="settings.edid.EdidCeaOverride" icon="hdr_on" :title="vp.ceaOverride" :text="vp.ceaOverrideText" data-cfg="EdidCeaOverride" />
+              <MItem icon="description" :title="edidFileExists ? t.vddSettings.edidUploaded : t.vddSettings.edidNotUploaded" :text="edidFilePath" />
+              <MItem action icon="upload" :title="t.vddSettings.edidSelectFile" @click="edidInput?.click()" />
+              <MItem action icon="download" :title="t.vddSettings.edidDownload" :disabled="!edidFileExists" @click="downloadEdid" />
+              <template v-if="edidInfo">
+                <MItem icon="storage" :title="t.vddSettings.edidFileSize" :value="`${edidInfo.size} ${t.vddSettings.edidBytes}`" />
+                <MItem icon="info" :title="t.vddSettings.edidFormat" :value="getEdidFormatLabel(edidInfo.size)" />
+                <MItem :icon="edidInfo.checksumValid ? 'check_circle' : 'error'" title="Checksum" :value="edidInfo.checksumValid ? t.vddSettings.edidChecksumValid : t.vddSettings.edidChecksumInvalid" />
+              </template>
+            </template>
+          </MGroup>
+          <MBanner v-if="hasCustomEdidIssue" tone="warn" icon="warning">{{ t.vddSettings.customEdidMissingInline }}</MBanner>
+          <MBanner v-if="settings.edid.CustomEdid" tone="warn" icon="warning">{{ t.vddSettings.edidWarning }}</MBanner>
+          <MFooter>{{ t.vddSettings.edidSectionHint }}</MFooter>
+          <input ref="edidInput" type="file" accept=".bin" hidden @change="onEdidPicked">
+        </MSection>
+        <MSection :title="vp.cursorTitle">
+          <MGroup>
+            <MChoiceItem :model-value="settings.cursor.CursorMaxX" icon="mouse" :title="vp.cursorMax" :text="vp.cursorMaxText" :options="cursorMaxOptions" :cancel-label="t.common.cancel" data-cfg="CursorMax" @update:model-value="(v) => confirmThen('cursor', vp.cursorMax, () => { settings.cursor.CursorMaxX = v; settings.cursor.CursorMaxY = v })" />
+            <MSwitchItem :model-value="settings.cursor.AlphaCursorSupport" icon="blur_on" :title="vp.alphaCursor" :text="vp.alphaCursorText" data-cfg="AlphaCursorSupport" @update:model-value="(v) => confirmThen('cursor', vp.alphaCursor, () => (settings.cursor.AlphaCursorSupport = v))" />
+            <MChoiceItem :model-value="settings.cursor.XorCursorSupportLevel" icon="tune" :title="vp.xorCursor" :text="vp.xorCursorText" :options="xorLevelOptions" :cancel-label="t.common.cancel" data-cfg="XorCursorSupportLevel" @update:model-value="(v) => confirmThen('cursor', vp.xorCursor, () => (settings.cursor.XorCursorSupportLevel = v))" />
+          </MGroup>
+          <MFooter>{{ vp.cursorHint }}</MFooter>
+        </MSection>
+      </template>
+
+      <MDialog v-model="confirm.open" :title="vp.confirmTitle.replace('{name}', confirm.name)" icon="warning" tone="warning">
+        <p class="vdd-confirm__text">{{ confirm.text }}</p>
+        <template #actions>
+          <MButton variant="text" @click="confirm.open = false">{{ vp.cancel }}</MButton>
+          <MButton @click="confirmApply">{{ vp.confirmChange }}</MButton>
+        </template>
+      </MDialog>
+    </template>
+  </MPage>
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import {
-  Monitor,
-  Plus,
-  UploadFilled,
-  Upload,
-  Download,
-  Refresh,
-  Delete,
-  VideoPlay,
-  VideoPause,
-  FolderOpened,
-  CircleCheck,
-  Warning,
-  DataAnalysis,
-  Sunny,
-  Tools,
-} from '@element-plus/icons-vue'
-import { useEditableOptionField } from '../composables/useEditableOptionField.js'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox } from '../composables/notifyMessage.js'
+import { MExpander, MVddDevice, displayTreeTexts, MPage, MGroup, MSection, MItem, MSwitchItem, MChoiceItem, MDialog, MValueItem, MSeg, MBanner, MFooter, MButton, MIconButton, MStatusPill, MProgress, MCheckItem, MPageLoading, useSubpage, vddPageTexts, vddTexts, vddOn } from 'foundation-ui/vue'
+import { useHostVdd } from '../composables/useHostVdd.js'
+import { cleanList } from 'foundation-ui/settings/modeList.js'
 import { useVddEdid } from '../composables/useVddEdid.js'
 import { useVddStatusLabel } from '../composables/useVddStatusLabel.js'
 import { installVddWithRecovery } from '../composables/vddInstallRecovery.js'
-import { openExternalUrl, sunshine, vdd } from '../tauri-adapter.js'
+import { sunshine, vdd } from '../tauri-adapter.js'
+import { setPath, useVddPending } from '../composables/useVddPending.js'
 import { useI18n } from '../desktop/i18n/index.js'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
+const vp = computed(() => vddPageTexts(locale.value))
+const vt = computed(() => vddTexts(locale.value))
 
 const DEFAULT_REFRESH_RATES = ['60', '120', '240']
-const suggestedResolutions = ['1280x720', '1920x1080', '2560x1440', '3840x2160']
-const suggestedRefreshRates = ['60', '120', '144', '240']
-const RESOLUTION_PATTERN = /^\d+x\d+$/
-const REFRESH_RATE_PATTERN = /^\d+(\.\d+)?$/
 const CHINESE_PATTERN = /[\u4e00-\u9fa5]/
-const capabilityBadges = [
-  { key: 'hdr', tone: 'hdr', text: 'HDR', sub: 'dynamic range' },
-  { key: 'resolution', tone: 'resolution', text: '4K', sub: 'ultra hd' },
-  { key: 'refresh', tone: 'refresh', text: '240Hz', sub: 'high refresh' },
-  { key: 'sync', tone: 'sync', text: 'VRR', sub: 'adaptive sync' },
-]
 const COLOR_DEPTH_DEFAULT = 'default'
 const COLOR_DEPTH_SDR10 = 'sdr10'
 const COLOR_DEPTH_HDR12 = 'hdr12'
@@ -758,12 +210,14 @@ const createInitialSettings = () => ({
     DolbyVision: false,
     PreventSpoof: false,
     EdidCeaOverride: false,
+    EdidProfile: 'auto',
     Vrr: false,
   },
 })
 
 const getErrorMessage = (error, fallback = '') => {
-  if (error instanceof Error && error.message) {
+  // the browser's own network failures ("Failed to fetch") are not wording for a person: the page's own sentence says what happened
+  if (error instanceof Error && error.message && !(error instanceof TypeError && /fetch|network|load failed/i.test(error.message))) {
     return error.message
   }
 
@@ -779,7 +233,6 @@ const fillPlaceholders = (message, replacements = {}) => Object.entries(replacem
   message || ''
 )
 
-const getVddText = (key, replacements = {}) => fillPlaceholders(t.value.vddSettings[key], replacements)
 
 const syncGpuOptions = (options = []) => {
   const uniqueOptions = [...new Set(options.filter(Boolean))]
@@ -814,6 +267,8 @@ const vddStatus = reactive({
 const isLoading = ref(false)
 const isCheckingDriver = ref(false)
 const hasCompletedDriverCheck = ref(false)
+// the first check, made when the page opens
+const openingCheck = ref(true)
 const driverCheckPhase = ref('detecting')
 const isInstallingDriver = ref(false)
 const isSaving = ref(false)
@@ -823,10 +278,73 @@ const isStartingTrace = ref(false)
 const isStoppingTrace = ref(false)
 const isOpeningTraceFolder = ref(false)
 const isRefreshingCalibration = ref(false)
-const isLaunchingCalibration = ref(false)
-const isSavingCalibration = ref(false)
-const isLaunchingPhysicalCalibration = ref(false)
-const activeSection = ref('overview')
+const { current: vddSub, open: openVddSub, back: backVdd } = useSubpage('vdd')
+
+// ---- the host's keys of the virtual display (the modes, the shared display, the rules, the expert options): the shared store, each change saved at once ----
+const hostVdd = useHostVdd()
+const emit = defineEmits(['close', 'webui-navigate'])
+const dt = computed(() => displayTreeTexts(locale.value))
+const driverOpen = ref(false)
+const keepModel = computed({ get: () => hostVdd.store.mode.value === 'persistent', set: (on) => { void hostVdd.store.set({ vdd_keep_enabled: on }) } })
+// the state of the device card: the driver as the host reports it ('degraded' still works but asks for a repair)
+const deviceState = computed(() => (isDriverCheckPending.value ? 'checking' : vddStatus.state === 'degraded' ? 'degraded' : vddReady.value ? 'ready' : ['unknown', ''].includes(vddStatus.state) ? 'unknown' : 'missing'))
+// create or close the display now: the same tray actions the tray menu runs, through the host API
+const isCreatingNow = ref(false)
+async function trayVdd(action) {
+  isCreatingNow.value = true
+  try { await hostVdd.fetchJson('/api/tray/action', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action }) }); await hostVdd.store.refresh() } catch (error) { ElMessage.error(getErrorMessage(error, '')) } finally { isCreatingNow.value = false }
+}
+const hostConfig = hostVdd.store.config
+const flagOf = (key, def = false) => computed({
+  get: () => (hostConfig.value[key] === undefined || hostConfig.value[key] === '' ? def : vddOn(hostConfig.value[key])),
+  set: (on) => { void hostVdd.store.set({ [key]: typeof hostConfig.value[key] === 'boolean' ? on : on ? 'enabled' : 'disabled' }) },
+})
+const reuseModel = flagOf('vdd_reuse')
+const headlessModel = flagOf('vdd_headless_create')
+
+// the Vulkan HDR bridge: what the host reports and a test of the current display
+const vulkanStatus = ref({ state: 'idle', artifacts_installed: false, display_available: false })
+const vulkanLoaded = ref(false)
+const vulkanValidating = ref(false)
+const vulkan = {
+  validating: vulkanValidating,
+  async refresh() {
+    try { const r = await hostVdd.fetchJson('/api/vulkan-hdr-bridge'); if (String(r?.status) === 'true') vulkanStatus.value = r; else throw new Error('no status') } catch { vulkanStatus.value = { state: 'unavailable', artifacts_installed: false, display_available: false } } finally { vulkanLoaded.value = true }
+  },
+  async validate() {
+    vulkanValidating.value = true; vulkanStatus.value = { ...vulkanStatus.value, state: 'validating' }
+    try { vulkanStatus.value = await hostVdd.fetchJson('/api/vulkan-hdr-bridge/validate', { method: 'POST' }) } catch { vulkanStatus.value = { ...vulkanStatus.value, state: 'error' } } finally { vulkanValidating.value = false; vulkanLoaded.value = true }
+  },
+}
+
+// an expert option is confirmed before it changes: what it does, then the change
+const confirm = reactive({ open: false, name: '', text: '', apply: null })
+const confirmThen = (riskKey, name, apply) => { Object.assign(confirm, { open: true, name, text: vp.value.risk[riskKey] || '', apply }) }
+const confirmApply = () => { const run = confirm.apply; confirm.open = false; confirm.apply = null; if (run) run() }
+const displaySummary = computed(() => [gpuFriendlyName.value, `${settings.monitors.count}`].filter(Boolean).join(' · '))
+const edidProfileOptions = computed(() => ['auto', 'legacy', 'modern'].map((value) => ({ value, label: vp.value.edidProfiles[value].title })))
+const cursorMaxOptions = computed(() => [...new Set([64, 128, 256, Number(settings.cursor.CursorMaxX) || 128])].sort((x, y) => x - y).map((value) => ({ value, label: `${value} × ${value}` })))
+const xorLevelOptions = computed(() => [0, 1, 2, 3].map((value) => ({ value, label: vp.value.xorLevels[value] })))
+const qualitySummary = computed(() => [colorDepthOptions.value.find((o) => o.value === colorDepthProfile.value)?.label, settings.colour.ColourFormat].filter(Boolean).join(' · '))
+onMounted(() => { void hostVdd.load(); void vulkan.refresh() })
+const activeSection = computed({
+  get: () => vddSub.value || 'overview',
+  set: (value) => { if (value === 'overview') { if (vddSub.value) backVdd() } else openVddSub(value) },
+})
+// the toolbar menu's 调整 DPI: the overview, scrolled to 桌面缩放
+const pageTitle = computed(() => ({ display: t.value.vddSettings.tabDisplay, quality: vp.value.qualityTitle, calibration: t.value.vddSettings.calibrationTitle, driver: vp.value.driverTitle }[activeSection.value] || t.value.m3e.display.vdd))
+const edidInput = ref(null)
+const onEdidPicked = (event) => {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (file) handleEdidFileChange({ raw: file })
+}
+const colorDepthOptions = computed(() => [
+  { value: COLOR_DEPTH_DEFAULT, label: t.value.vddSettings.colorDepthDefault },
+  { value: COLOR_DEPTH_SDR10, label: t.value.vddSettings.sdr10bit },
+  { value: COLOR_DEPTH_HDR12, label: t.value.vddSettings.hdr12bit },
+  ...(isColorDepthConflict.value ? [{ value: COLOR_DEPTH_CONFLICT, label: t.value.vddSettings.colorDepthConflict, disabled: true }] : []),
+])
 const hasLoadedSnapshot = ref(false)
 const lastSavedSnapshot = ref('')
 const createCalibrationStatus = () => ({
@@ -850,7 +368,6 @@ const createCalibrationStatus = () => ({
   statusText: '',
 })
 const calibrationStatus = reactive(createCalibrationStatus())
-const vddReuseEnabled = computed(() => Boolean(calibrationStatus.sharedVdd))
 
 let calibrationContextPollTimer = null
 let calibrationContextRequest = null
@@ -867,82 +384,11 @@ const {
   removeEdidFile: removeEdidFileAction,
 } = useVddEdid({ t, settings })
 
-const compareResolutions = (a, b) => {
-  const [aWidth, aHeight] = a.split('x').map(Number)
-  const [bWidth, bHeight] = b.split('x').map(Number)
-  return aWidth * aHeight - bWidth * bHeight || aWidth - bWidth || aHeight - bHeight
-}
-
-const compareRefreshRates = (a, b) => parseFloat(a) - parseFloat(b)
-
-const {
-  options: resolutionOptions,
-  draft: newResolution,
-  visible: showResInput,
-  inputRef: resInputRef,
-  sortedOptions: sortedResolutionOptions,
-  setValues: setResolutionOptions,
-  showInput: showResolutionInput,
-  addDraft: addResolution,
-  addValue: quickAddResolution,
-  confirmInput: handleResInputConfirm,
-  removeValue: removeResolution,
-} = useEditableOptionField({
-  compare: compareResolutions,
-  validate: (value) => {
-    if (!RESOLUTION_PATTERN.test(value)) {
-      return false
-    }
-
-    const [width, height] = value.split('x').map(Number)
-    return width > 0 && height > 0
-  },
-  messages: {
-    invalid: { type: 'warning', text: () => t.value.vddSettings.resolutionFormatError },
-    exists: { type: 'info', text: () => t.value.vddSettings.resolutionExists },
-    added: { type: 'success', text: (value) => getVddText('resolutionAdded', { value }) },
-    removed: { type: 'info', text: (value) => getVddText('resolutionRemoved', { value }) },
-    minOne: { type: 'error', text: () => t.value.vddSettings.resolutionMinOne },
-  },
-})
-
-const {
-  options: refreshRateOptions,
-  draft: newRefreshRate,
-  visible: showRateInput,
-  inputRef: rateInputRef,
-  sortedOptions: sortedRefreshRateOptions,
-  setValues: setRefreshRateOptions,
-  showInput: showRefreshRateInput,
-  addDraft: addRefreshRate,
-  addValue: quickAddRefreshRate,
-  confirmInput: handleRateInputConfirm,
-  removeValue: removeRefreshRate,
-} = useEditableOptionField({
-  initialValues: DEFAULT_REFRESH_RATES,
-  compare: compareRefreshRates,
-  validate: (value) => {
-    if (!REFRESH_RATE_PATTERN.test(value)) {
-      return false
-    }
-
-    const rate = parseFloat(value)
-    return rate >= 1 && rate <= 480
-  },
-  messages: {
-    invalid: { type: 'warning', text: () => t.value.vddSettings.refreshRateInvalidExt },
-    exists: { type: 'warning', text: () => t.value.vddSettings.refreshRateExists },
-    added: { type: 'success', text: (value) => getVddText('refreshRateAdded', { value }) },
-    removed: { type: 'info', text: (value) => getVddText('refreshRateRemoved', { value }) },
-    minOne: { type: 'error', text: () => t.value.vddSettings.refreshRateMinOne },
-  },
-})
-
-const gpuSummary = computed(() => gpuFriendlyName.value || t.value.vddSettings.unboundGpu)
-const presetSummary = computed(() => getVddText('presetsSummary', {
-  resolutions: sortedResolutionOptions.value.length,
-  rates: sortedRefreshRateOptions.value.length,
-}))
+// the two mode lists of the driver, in the person's own order (the editor moves, edits, adds, removes; sorting is a button, never automatic)
+const resolutionList = ref([])
+const rateList = ref([...DEFAULT_REFRESH_RATES])
+const setResolutionOptions = (values = []) => { resolutionList.value = cleanList('resolution', values) }
+const setRefreshRateOptions = (values = []) => { rateList.value = cleanList('rate', values) }
 const traceDisplayPath = computed(() => traceStatus.value.latest_file || t.value.vddSettings.vddTraceNoFile)
 const hasCustomEdidIssue = computed(() => settings.edid.CustomEdid && !edidFileExists.value)
 const isColorDepthConflict = computed(() => settings.colour.SDR10bit && settings.colour.HDRPlus)
@@ -967,80 +413,16 @@ const colorDepthProfile = computed({
     settings.colour.HDRPlus = value === COLOR_DEPTH_HDR12
   },
 })
-const currentVddModeLabel = computed(() => vddReuseEnabled.value
-  ? t.value.vddSettings.sharedVddMode
-  : t.value.vddSettings.dedicatedVddMode)
-const currentVddModeHint = computed(() => vddReuseEnabled.value
-  ? t.value.vddSettings.sharedVddModeDesc
-  : t.value.vddSettings.dedicatedVddModeDesc)
-const overviewCards = computed(() => [
-  {
-    key: 'mode',
-    label: t.value.vddSettings.overviewMode,
-    value: currentVddModeLabel.value,
-    hint: currentVddModeHint.value,
-  },
-  {
-    key: 'presets',
-    label: t.value.vddSettings.overviewPresets,
-    value: presetSummary.value,
-  },
-  {
-    key: 'gpu',
-    label: t.value.vddSettings.overviewGpu,
-    value: gpuSummary.value,
-  },
-])
-const sectionTabs = computed(() => [
-  { key: 'overview', label: t.value.vddSettings.tabOverview, icon: DataAnalysis },
-  { key: 'display', label: t.value.vddSettings.tabDisplay, icon: Monitor },
-  { key: 'calibration', label: t.value.vddSettings.tabCalibration, icon: Sunny },
-  { key: 'driver', label: t.value.vddSettings.tabDriver, icon: Tools },
-])
-
-const focusSectionByIndex = async (index) => {
-  const tabs = sectionTabs.value
-  if (!tabs.length) return
-  const normalizedIndex = (index + tabs.length) % tabs.length
-  activeSection.value = tabs[normalizedIndex].key
-  await nextTick()
-  document.getElementById(`vdd-tab-${activeSection.value}`)?.focus()
-}
-
-const focusAdjacentSection = (key, offset) => {
-  const currentIndex = sectionTabs.value.findIndex((tab) => tab.key === key)
-  if (currentIndex >= 0) focusSectionByIndex(currentIndex + offset)
-}
-const heroActions = computed(() => [
-  {
-    key: 'reload',
-    label: t.value.vddSettings.reload,
-    icon: Refresh,
-    loading: isLoading.value,
-    plain: true,
-    type: undefined,
-    onClick: reloadSettings,
-  },
-  {
-    key: 'save',
-    label: t.value.vddSettings.saveAndApply,
-    icon: UploadFilled,
-    loading: isSaving.value,
-    plain: !hasUnsavedChanges.value,
-    type: hasUnsavedChanges.value ? 'primary' : undefined,
-    onClick: saveSettings,
-  },
-])
 const buildSettingsPayload = () => ({
   ...settings,
   gpu: {
     friendlyname: gpuFriendlyName.value.trim(),
   },
   global: {
-    g_refresh_rate: [...sortedRefreshRateOptions.value],
+    g_refresh_rate: [...rateList.value],
   },
   resolutions: {
-    resolution: sortedResolutionOptions.value.map((res) => {
+    resolution: resolutionList.value.map((res) => {
       const [width, height] = res.split('x').map(Number)
       return { width, height }
     }),
@@ -1049,6 +431,21 @@ const buildSettingsPayload = () => ({
 
 const takeSnapshot = () => JSON.stringify(buildSettingsPayload())
 
+// the edits belong to the window's unsaved state (one bar for every page, saved from anywhere); the page reports them and takes them back
+useVddPending({
+  payload: buildSettingsPayload,
+  saved: () => JSON.parse(lastSavedSnapshot.value || '{}'),
+  ready: hasLoadedSnapshot,
+  locale: () => locale.value,
+  set: (path, value) => {
+    if (path === 'gpu.friendlyname') { gpuFriendlyName.value = value; settings.gpu.friendlyname = value }
+    else if (path === 'global.g_refresh_rate') setRefreshRateOptions((value || []).map(String))
+    else if (path === 'resolutions.resolution') setResolutionOptions((value || []).map((r) => `${r.width}x${r.height}`))
+    else setPath(settings, path, value)
+  },
+  onSaved: () => markSettingsClean(),
+  onReverted: () => syncVddState({ silentLoad: true }),
+})
 const hasUnsavedChanges = computed(() => hasLoadedSnapshot.value && takeSnapshot() !== lastSavedSnapshot.value)
 const vddReady = computed(() =>
   vddStatus.running &&
@@ -1064,47 +461,7 @@ const driverDetectionDescription = computed(() => driverCheckPhase.value === 'sy
   : t.value.vddSettings.driverDetectionDesc)
 const vddCanInstall = computed(() => !['unsupported', 'payload_missing'].includes(vddStatus.state))
 const vddStatusLabel = useVddStatusLabel(t, vddStatus)
-const activeCalibrationClient = computed(() => calibrationStatus.activeClients?.[0] || null)
-const hasActiveHdrClient = computed(() => Boolean(activeCalibrationClient.value))
-const calibrationStatusTone = computed(() => {
-  if (calibrationStatus.calibrated) return 'success'
-  if (!calibrationStatus.supported) return 'danger'
-  if (!calibrationStatus.vddActive || !calibrationStatus.hdrEnabled) return 'warning'
-  return 'ready'
-})
-const calibrationStatusTitle = computed(() => {
-  if (calibrationStatus.calibrated) return t.value.vddSettings.calibrationDetected
-  if (calibrationStatus.state === 'unbound_profile') return t.value.vddSettings.calibrationUnbound
-  if (calibrationStatus.state === 'invalid_profile') return t.value.vddSettings.calibrationInvalid
-  if (calibrationStatus.state === 'locked') return t.value.vddSettings.calibrationLocked
-  if (calibrationStatus.state === 'unavailable') return t.value.vddSettings.calibrationRefreshFailed
-  if (calibrationStatus.state === 'shared_vdd') return t.value.vddSettings.calibrationSharedWarning
-  if (calibrationStatus.state === 'multiple_streams') return t.value.vddSettings.calibrationMultipleStreams
-  if (!calibrationStatus.supported) return t.value.vddSettings.calibrationUnsupported
-  if (!calibrationStatus.vddActive) return t.value.vddSettings.calibrationWaitingVdd
-  if (!calibrationStatus.hdrEnabled) return t.value.vddSettings.calibrationWaitingHdr
-  return t.value.vddSettings.calibrationReady
-})
-const calibrationStatusDescription = computed(() => {
-  if (calibrationStatus.statusText) return calibrationStatus.statusText
-  if (calibrationStatus.calibrated) return t.value.vddSettings.calibrationDetectedHint
-  if (calibrationStatus.state === 'unbound_profile') return t.value.vddSettings.calibrationUnboundHint
-  if (calibrationStatus.state === 'invalid_profile') return t.value.vddSettings.calibrationInvalidHint
-  if (calibrationStatus.state === 'locked') return t.value.vddSettings.calibrationLocked
-  if (calibrationStatus.state === 'multiple_streams') return t.value.vddSettings.calibrationMultipleStreams
-  if (calibrationStatus.state === 'unavailable') {
-    const diagnostic = calibrationStatus.diagnostic
-    return `${t.value.vddSettings.calibrationRefreshFailed}${diagnostic?.stage ? ` (${diagnostic.stage}, 0x${Number(diagnostic.hresult).toString(16)})` : ''}`
-  }
-  if (!calibrationStatus.vddActive) return t.value.vddSettings.calibrationWaitingStream
-  if (!calibrationStatus.hdrEnabled) return t.value.vddSettings.calibrationWaitingHdrHint
-  return t.value.vddSettings.calibrationReadyHint
-})
 
-const formatCalibrationNits = (value) => {
-  if (!Number.isFinite(value)) return '—'
-  return `${value < 1 ? value.toFixed(4).replace(/0+$/, '').replace(/\.$/, '') : Math.round(value)} nits`
-}
 
 const stopCalibrationContextPolling = () => {
   if (calibrationContextPollTimer) {
@@ -1149,7 +506,6 @@ const loadCalibrationContext = ({ silent = false, snapshot = null } = {}) => {
     if (!silent) isRefreshingCalibration.value = true
     try {
       const context = await requestCalibration(snapshot)
-
       Object.assign(calibrationStatus, createCalibrationStatus(), context, { statusText: '' })
       return context
     } catch (error) {
@@ -1174,87 +530,10 @@ const startCalibrationContextPolling = () => {
   calibrationContextPollTimer = setInterval(() => loadCalibrationContext({ silent: true }), 2500)
 }
 
-const launchHdrCalibration = async () => {
-  try {
-    await ElMessageBox.confirm(
-      t.value.vddSettings.calibrationLaunchConfirm,
-      t.value.vddSettings.calibrationLaunchTitle,
-      {
-        confirmButtonText: t.value.vddSettings.calibrationLaunch,
-        cancelButtonText: t.value.vddSettings.cancel,
-        type: 'info',
-      }
-    )
-    isLaunchingCalibration.value = true
-    // Finish any poll, then request a fresh snapshot after the confirmation.
-    await calibrationContextRequest
-    await loadCalibrationContext()
-    if (!calibrationStatus.canCalibrate) return
-    const result = await vdd.launchHdrCalibration()
-    if (!result?.success) {
-      throw new Error(result?.message || t.value.vddSettings.calibrationLaunchFailed)
-    }
-    ElMessage.success(t.value.vddSettings.calibrationLaunched)
-    startCalibrationContextPolling()
-  } catch (error) {
-    if (error !== 'cancel') {
-      ElMessage.error(getErrorMessage(error, t.value.vddSettings.calibrationLaunchFailed))
-    }
-  } finally {
-    isLaunchingCalibration.value = false
-  }
-}
 
-const bindHdrCalibration = async () => {
-  if (isSavingCalibration.value) return
-  isSavingCalibration.value = true
-  try {
-    // Keep the clicked identity even if a pending poll discovers another client.
-    const context = await loadCalibrationContext({ silent: true, snapshot: { ...calibrationStatus } })
-    if (!context) throw new Error(calibrationStatus.statusText)
-    ElMessage.success(t.value.vddSettings.calibrationDetected)
-  } catch (error) {
-    ElMessage.error(getErrorMessage(error, t.value.vddSettings.calibrationRefreshFailed))
-  } finally {
-    isSavingCalibration.value = false
-  }
-}
 
-const launchPhysicalHdrCalibration = async () => {
-  try {
-    await ElMessageBox.confirm(
-      t.value.vddSettings.physicalCalibrationConfirm,
-      t.value.vddSettings.physicalCalibrationTitle,
-      {
-        confirmButtonText: t.value.vddSettings.physicalCalibrationLaunch,
-        cancelButtonText: t.value.vddSettings.cancel,
-        type: 'info',
-      }
-    )
-    isLaunchingPhysicalCalibration.value = true
-    const result = await vdd.launchHdrCalibration()
-    if (!result?.success) {
-      throw new Error(result?.message || t.value.vddSettings.calibrationLaunchFailed)
-    }
-    ElMessage.success(t.value.vddSettings.physicalCalibrationLaunched)
-  } catch (error) {
-    if (error !== 'cancel') {
-      ElMessage.error(getErrorMessage(error, t.value.vddSettings.calibrationLaunchFailed))
-    }
-  } finally {
-    isLaunchingPhysicalCalibration.value = false
-  }
-}
 
-const openHdrCalibrationStore = async () => {
-  try {
-    const opened = await openExternalUrl('ms-windows-store://pdp/?ProductId=9N7F2SM5D1LR')
-    if (!opened) ElMessage.error(t.value.vddSettings.calibrationStoreFailed)
-  } catch (error) {
-    console.error('Failed to open HDR calibration store page:', error)
-    ElMessage.error(t.value.vddSettings.calibrationStoreFailed)
-  }
-}
+
 
 const markSettingsClean = () => {
   lastSavedSnapshot.value = takeSnapshot()
@@ -1390,6 +669,7 @@ const recheckDriver = async () => {
     }
   } finally {
     hasCompletedDriverCheck.value = true
+    openingCheck.value = false
   }
 }
 
@@ -1576,6 +856,15 @@ onUnmounted(() => {
 })
 </script>
 
-<style lang="less" scoped>
-@import '../styles/VddSettings.less';
+<style>
+.vdd-preview { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px; padding: 18px 20px; border-radius: 28px; background: var(--m-card); margin-bottom: 8px; }
+.vdd-preview__item { display: flex; flex-direction: column; align-items: center; } .vdd-preview .m-dinfo__display { max-height: none; }
+.vdd-preview__note { margin-left: auto; align-self: center; font: var(--m-label-large); color: var(--md-sys-color-on-surface-variant); font-variant-numeric: tabular-nums; }
+.m-vdd-badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.m-tiles--static { --m-cols: 2; grid-auto-rows: minmax(104px, auto); min-height: 0; max-height: none; }
+.m-chips-edit { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.m-chips-edit--suggest { margin-top: 8px; }
+.m-chip--x { padding-right: 4px; } .m-chip--x button { display: inline-grid; place-items: center; width: 20px; height: 20px; border: 0; border-radius: 50%; padding: 0; background: transparent; color: inherit; cursor: pointer; font-size: 14px; } .m-chip--x button:hover { background: color-mix(in srgb, currentColor 14%, transparent); }
+.m-chip--pick { border: 0; padding: 0 12px; cursor: pointer; background: transparent; box-shadow: inset 0 0 0 1px var(--md-sys-color-outline-variant); color: var(--md-sys-color-on-surface-variant); } .m-chip--pick:hover:not(:disabled) { background: color-mix(in srgb, var(--md-sys-color-on-surface) 8%, transparent); } .m-chip--pick:disabled { opacity: .38; cursor: not-allowed; }
+.m-inline-input { height: 32px; width: 140px; padding: 0 12px; border: 0; border-radius: 16px; outline: 0; background: var(--md-sys-color-surface-container-highest); color: var(--md-sys-color-on-surface); font: var(--m-body-medium); box-shadow: inset 0 0 0 2px var(--md-sys-color-primary); }
 </style>
