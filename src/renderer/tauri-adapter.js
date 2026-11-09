@@ -40,6 +40,11 @@ export function isAllowedExternalUrl(url) {
   return /^(https?:\/\/|ms-windows-store:\/\/)/i.test(String(url || '').trim())
 }
 
+// the Windows Device Manager, to enable a disabled device (VB-CABLE); never changes a device itself
+export async function openDeviceManager() {
+  return invoke('open_device_manager')
+}
+
 export async function openExternalUrl(url) {
   try {
     if (!isAllowedExternalUrl(url)) return false
@@ -115,26 +120,23 @@ export const controllerHub = {
   }),
 }
 
+// the audio endpoints of the host and the VB-CABLE state (GET /api/audio/devices)
+export const audioDevices = {
+  get: () => wrapResult('get_audio_devices'),
+  // 'install' (download, verify, silent setup) or 'enable' (pnputil); ask the person first
+  startVbCableJob: (action) => wrapResult('start_vb_cable_job', { action }),
+}
+
 export const virtualMicrophone = {
   getStatus: () => wrapResult('get_virtual_microphone_status'),
   test: () => wrapResult('test_virtual_microphone'),
+  saveBackend: (backend) => wrapResult('save_microphone_backend', { backend }),
 }
 
 export const dualsense = {
   getStatus: () => wrapResult('dualsense_get_status'),
-  logPanelOpened: () => wrapResult('dualsense_log_panel_opened'),
-  install: (packagePaths = []) => wrapResult('dualsense_install', { packagePaths }),
-  uninstall: () => wrapResult('dualsense_uninstall'),
-  setConfig: (audioHaptics, genshinCompatibility) => wrapResult('dualsense_set_config', {
-    audioHaptics: !!audioHaptics,
-    genshinCompatibility: !!genshinCompatibility,
-  }),
-  setHapticsTuning: (strength, curve, noiseGate) => wrapResult('dualsense_set_haptics_tuning', {
-    strength,
-    curve,
-    noiseGate,
-  }),
-  selfTest: (profile) => wrapResult('dualsense_self_test', { profile }),
+  getTuning: () => wrapResult('dualsense_get_tuning'),
+  setTuning: (values) => wrapResult('dualsense_set_tuning', { values }),
 }
 
 export const usbip = {
@@ -180,12 +182,16 @@ export const dlssNr = {
 
 export const sunshine = {
   getVersion: () => wrapDefault('get_sunshine_version', 'Unknown'),
+  // the build identity of sunshine.exe (commit, channel, UTC build time, variant, package): its VERSIONINFO keys, else `--version --json`; null for an older host
+  getBuildInfo: () => wrapDefault('get_sunshine_build_info', null),
   parseConfig: () => wrapDefault('parse_sunshine_config', {}),
   getUrl: () => wrapDefault('get_sunshine_url', 'https://localhost:47990/'),
   getCommandLineUrl: () => wrapDefault('get_command_line_url', null),
   getProxyUrl: () => wrapDefault('get_proxy_url_command', 'http://localhost:48081'),
   waitForProxyReady: () => wrapResult('wait_for_proxy_ready'),
   refreshTarget: () => wrapDefault('refresh_sunshine_target', null),
+  // one probe of the host made by the panel's own process (the WebView's connections to the proxy may be busy): the HTTP status, or a rejection when nothing answered
+  probeHost: (timeoutMs = 2500) => invoke('probe_sunshine_host', { timeoutMs }),
   getActiveSessions: () => wrapDefault('get_active_sessions', []),
   getLocale: () => wrapDefault('get_sunshine_locale', 'en'),
   setLocale: (locale) => invoke('set_sunshine_locale', { locale }),
@@ -193,12 +199,27 @@ export const sunshine = {
   stopAllSessions: () => invoke('stop_all_sessions'),
 }
 
+// ─── Sunshine 服务（SCM）────────────────────────────────
+
+// The SCM, process and API layers of SunshineService and the changes that need administrator approval (see
+// src-tauri/src/sunshine_service). Manual and Disabled need acknowledgeUnreachableAfterReboot; stop and restart during a
+// live stream need acknowledgeLiveStream: the back end refuses without them.
+export const sunshineService = {
+  status: () => invoke('get_sunshine_service_status'),
+  setStartType: (startType, acknowledgeUnreachableAfterReboot = false) => invoke('set_sunshine_service_start_type', { startType, acknowledgeUnreachableAfterReboot }),
+  control: (action, acknowledgeLiveStream = false) => invoke('control_sunshine_service', { action, acknowledgeLiveStream }),
+}
+
 // ─── 系统工具 ────────────────────────────────────────────
 
 export const tools = {
   restartGraphicsDriver: () => invoke('restart_graphics_driver'),
-  restartSunshineService: () => invoke('restart_sunshine_service'),
-  restartSunshineInUserMode: () => invoke('restart_sunshine_in_user_mode'),
+  // what the operating system says about the host (process, service, whether a stop was asked for): the 「Sunshine 意外停止」 surface is decided on it, not on a silence
+  getHostFacts: () => invoke('get_sunshine_host_facts'),
+  // through the hardened elevated helper (src-tauri/src/sunshine_service); during a live stream the back end needs acknowledgeLiveStream,
+  // which a caller passes only after its own confirmation said that streams end
+  restartSunshineService: (acknowledgeLiveStream = false) => invoke('restart_sunshine_service', { acknowledgeLiveStream }),
+  restartSunshineInUserMode: (acknowledgeLiveStream = false) => invoke('restart_sunshine_in_user_mode', { acknowledgeLiveStream }),
   uninstallVddDriver: () => invoke('uninstall_vdd_driver'),
   openNativeTool: (toolId) => invoke('open_native_tool', { toolId }),
 }
@@ -255,11 +276,13 @@ export async function readDirectory(path) {
 export default {
   darkMode,
   openExternalUrl,
+  openDeviceManager,
   vdd,
   vmouse,
   vigem,
   controllerHub,
   virtualMicrophone,
+  audioDevices,
   dualsense,
   usbip,
   rtxHdr,
