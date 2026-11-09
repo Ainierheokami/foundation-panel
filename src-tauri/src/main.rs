@@ -4,6 +4,7 @@
 mod app;
 mod bat_runner;
 mod build_identity;
+mod component_inventory;
 mod client_fingerprint_rules;
 mod clipboard;
 mod commands;
@@ -321,6 +322,7 @@ fn main() {
             controller_hub::get_virtual_microphone_status,
             controller_hub::test_virtual_microphone,
             vigem::get_vigem_status,
+            component_inventory::get_component_inventory,
             vigem::install_vigem_driver,
             vigem::uninstall_vigem_driver,
             dualsense::dualsense_get_status,
