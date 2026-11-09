@@ -69,6 +69,8 @@ struct RtssSharedMemoryHeader {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RtssStatus {
+    /// RivaTuner Statistics Server is installed (detect_rtss_install_dir finds it): an optional third-party component, the panel shows its page only then
+    pub installed: bool,
     pub running: bool,
     pub version: String,
     pub osd_slot_count: u32,
@@ -191,26 +193,35 @@ mod win {
 
     impl SharedMemoryHandle {
         pub fn open() -> std::result::Result<Self, String> {
-            unsafe {
-                let name = CString::new("RTSSSharedMemoryV2").unwrap();
-                let handle = OpenFileMappingA(
-                    FILE_MAP_READ.0 | FILE_MAP_WRITE.0,
-                    false,
-                    PCSTR(name.as_ptr() as *const u8),
-                )
-                .map_err(|e| format!("无法打开 RTSS 共享内存: {} (RTSS 可能未运行)", e))?;
-
-                let view = MapViewOfFile(handle, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, 0);
-
-                if view.Value.is_null() {
-                    let _ = CloseHandle(handle);
-                    return Err("映射 RTSS 共享内存失败".to_string());
+            let names = ["RTSSSharedMemoryV2", "Local\\RTSSSharedMemoryV2", "Global\\RTSSSharedMemoryV2"];
+            let accesses = [FILE_MAP_READ.0 | FILE_MAP_WRITE.0, FILE_MAP_READ.0];
+            let mut last = String::from("unable to open RTSS shared memory");
+            for name in names {
+                for access in accesses {
+                    match Self::map(name, access) {
+                        Ok(handle) => return Ok(handle),
+                        Err(error) => last = error,
+                    }
                 }
+            }
+            Err(last)
+        }
 
-                Ok(Self {
-                    ptr: view.Value,
-                    handle,
-                })
+        fn map(name: &str, access: u32) -> std::result::Result<Self, String> {
+            unsafe {
+                let name = CString::new(name).map_err(|error| error.to_string())?;
+                let handle = OpenFileMappingA(access, false, PCSTR(name.as_ptr() as *const u8))
+                    .map_err(|error| format!("unable to open RTSS shared memory: {error}"))?;
+                let view = MapViewOfFile(handle, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, 0);
+                if view.Value.is_null() {
+                    let view = MapViewOfFile(handle, FILE_MAP_READ, 0, 0, 0);
+                    if view.Value.is_null() {
+                        let _ = CloseHandle(handle);
+                        return Err("mapping RTSS shared memory failed".to_string());
+                    }
+                    return Ok(Self { ptr: view.Value, handle });
+                }
+                Ok(Self { ptr: view.Value, handle })
             }
         }
     }
@@ -234,37 +245,93 @@ fn detect_rtss_install_dir() -> Option<String> {
     use winreg::RegKey;
     use winreg::enums::*;
 
-    let paths = [
-        (HKEY_LOCAL_MACHINE, r"Software\WOW6432Node\Unwinder\RTSS"),
-        (HKEY_LOCAL_MACHINE, r"Software\Unwinder\RTSS"),
+    // 32-bit installer view first, then the native view. KEY_WOW64_32KEY reads the view
+    // RTSS actually writes [dr-ms-alt-registry-view]. A per-user install writes
+    // HKCU; a moved or repaired install can leave only the uninstall entry.
+    let mut candidates = Vec::new();
+    let views = [
+        (HKEY_LOCAL_MACHINE, r"Software\Unwinder\RTSS", KEY_READ | KEY_WOW64_32KEY),
+        (HKEY_LOCAL_MACHINE, r"Software\WOW6432Node\Unwinder\RTSS", KEY_READ | KEY_WOW64_64KEY),
+        (HKEY_LOCAL_MACHINE, r"Software\Unwinder\RTSS", KEY_READ | KEY_WOW64_64KEY),
+        (HKEY_CURRENT_USER, r"Software\Unwinder\RTSS", KEY_READ | KEY_WOW64_32KEY),
+        (HKEY_CURRENT_USER, r"Software\WOW6432Node\Unwinder\RTSS", KEY_READ | KEY_WOW64_64KEY),
+        (HKEY_CURRENT_USER, r"Software\Unwinder\RTSS", KEY_READ | KEY_WOW64_64KEY),
     ];
-
-    for (root, path) in &paths {
-        if let Ok(key) = RegKey::predef(*root).open_subkey(path) {
-            if let Ok(dir) = key.get_value::<String, _>("InstallDir") {
-                if std::path::Path::new(&dir).exists() {
-                    return Some(dir);
+    for (root, path, access) in views {
+        let Ok(key) = RegKey::predef(root).open_subkey_with_flags(path, access) else { continue };
+        if let Ok(dir) = key.get_value::<String, _>("InstallDir") {
+            candidates.push(dir);
+        }
+    }
+    // InstallLocation is the Add/Remove Programs key's directory value
+    // [p5u-ms-uninstall-registry].
+    for (root, base, access) in [
+        (HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Uninstall", KEY_READ | KEY_WOW64_32KEY),
+        (HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\Uninstall", KEY_READ | KEY_WOW64_64KEY),
+        (HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall", KEY_READ | KEY_WOW64_32KEY),
+        (HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall", KEY_READ | KEY_WOW64_64KEY),
+    ] {
+        for entry_name in ["RTSS", "RivaTuner Statistics Server"] {
+            let Ok(entry) = RegKey::predef(root).open_subkey_with_flags(format!(r"{base}\{entry_name}"), access) else { continue };
+            if let Ok(location) = entry.get_value::<String, _>("InstallLocation") {
+                if let Some(dir) = crate::rtss_detect::install_dir_from_uninstall_location(&location) {
+                    candidates.push(dir);
+                }
+            }
+            if let Ok(icon) = entry.get_value::<String, _>("DisplayIcon") {
+                if let Some(dir) = crate::rtss_detect::install_dir_from_display_icon(&icon) {
+                    candidates.push(dir);
                 }
             }
         }
     }
-
-    let common_paths = [
-        r"C:\Program Files (x86)\RivaTuner Statistics Server",
-        r"C:\Program Files\RivaTuner Statistics Server",
-    ];
-    for path in &common_paths {
-        if std::path::Path::new(path).exists() {
-            return Some(path.to_string());
+    // The default location follows ProgramFiles even when the system drive is not C:.
+    // ProgramFiles(x86) does not exist on 32-bit Windows.
+    for variable in ["ProgramFiles(x86)", "ProgramFiles"] {
+        if let Ok(root) = std::env::var(variable) {
+            let root = root.trim().trim_end_matches(['\\', '/']);
+            if !root.is_empty() {
+                candidates.push(format!(r"{root}\RivaTuner Statistics Server"));
+            }
         }
     }
+    crate::rtss_detect::choose_rtss_install_dir(&candidates, &rtss_process_images(), |dir| std::path::Path::new(dir).is_dir())
+}
 
-    None
+#[cfg(target_os = "windows")]
+fn rtss_process_images() -> Vec<String> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
+    use windows::core::PWSTR;
+    let Ok(list) = crate::device_probe::system_processes() else { return Vec::new() };
+    let mut images = Vec::new();
+    for process in list {
+        let name = process.name.to_ascii_lowercase();
+        if !matches!(name.as_str(), "rtss.exe" | "rtsshooksloader.exe" | "rtsshooksloader64.exe" | "encoderserver.exe") {
+            continue;
+        }
+        let Ok(handle) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process.pid) }) else { continue };
+        let mut buffer = vec![0u16; 32768];
+        let mut length = buffer.len() as u32;
+        let read = unsafe {
+            QueryFullProcessImageNameW(handle, windows::Win32::System::Threading::PROCESS_NAME_WIN32, PWSTR(buffer.as_mut_ptr()), &mut length)
+        };
+        unsafe { let _ = CloseHandle(handle); }
+        if read.is_ok() {
+            images.push(String::from_utf16_lossy(&buffer[..length as usize]));
+        }
+    }
+    images
 }
 
 #[cfg(not(target_os = "windows"))]
 fn detect_rtss_install_dir() -> Option<String> {
     None
+}
+
+/// RivaTuner Statistics Server is installed: the same answer as `RtssStatus::installed`. Entries that open its page (the tray menu) are offered only then.
+pub(crate) fn is_rtss_installed() -> bool {
+    detect_rtss_install_dir().is_some_and(|dir| !dir.is_empty())
 }
 
 /// 执行 rtss-cli 命令
@@ -282,10 +349,10 @@ fn run_rtss_cli(args: &[&str]) -> Result<String, String> {
         .output()
         .map_err(|e| format!("执行 rtss-cli 失败: {}", e))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stdout = crate::text_encoding::decode_console_bytes(&output.stdout).trim().to_string();
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stderr = crate::text_encoding::decode_console_bytes(&output.stderr).trim().to_string();
         return Err(format!("rtss-cli 错误: {} {}", stdout, stderr));
     }
 
@@ -557,6 +624,7 @@ pub async fn get_rtss_status() -> Result<RtssStatus, String> {
         };
 
         Ok(RtssStatus {
+            installed: !install_dir.is_empty(),
             running,
             version,
             osd_slot_count,
@@ -569,6 +637,7 @@ pub async fn get_rtss_status() -> Result<RtssStatus, String> {
     #[cfg(not(target_os = "windows"))]
     {
         Ok(RtssStatus {
+            installed: false,
             running: false,
             version: String::new(),
             osd_slot_count: 0,
@@ -624,7 +693,7 @@ impl OsdEntryLayout {
         }
         let bytes = unsafe { std::slice::from_raw_parts(slot.add(off), len) };
         let nul = bytes.iter().position(|&b| b == 0).unwrap_or(len);
-        String::from_utf8_lossy(&bytes[..nul]).to_string()
+        crate::text_encoding::decode_ansi_bytes(&bytes[..nul])
     }
 
     /// 槽位是否完全空闲（owner 与 text 首字节均为 0）
