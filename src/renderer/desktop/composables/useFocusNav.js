@@ -46,15 +46,18 @@ export function activeScopeRoot() {
 }
 
 function isVisible(element) {
-  if (element.hasAttribute('disabled') || element.getAttribute('aria-hidden') === 'true') {
+  if (!element || element.isConnected === false || element.hasAttribute('disabled') || element.getAttribute('aria-disabled') === 'true' || element.getAttribute('aria-hidden') === 'true') {
     return false
   }
+  if (element.getAttribute('tabindex') === '-1' || element.closest?.('[hidden], [inert], [aria-hidden="true"]')) return false
   const rect = element.getBoundingClientRect()
   if (rect.width <= 0 || rect.height <= 0) return false
   // 视口外的元素（例如横向条里滚走的部分）仍然可聚焦，只排除被隐藏的
   const style = window.getComputedStyle(element)
-  return style.visibility !== 'hidden' && style.display !== 'none'
+  return style.visibility !== 'hidden' && style.display !== 'none' && (typeof element.checkVisibility !== 'function' || element.checkVisibility({ checkOpacity: false, contentVisibilityAuto: true }))
 }
+
+export const isFocusVisible = isVisible
 
 export function collectFocusables(root = activeScopeRoot()) {
   if (!root) return []
@@ -159,11 +162,12 @@ const ENTRY_OFFSET = {
 /**
  * 焦点移动的入场动画：从移动方向的反侧轻微滑入并落定。
  * 用 WAAPI + composite: 'add'，与元素自身的 CSS transform（如卡片悬浮位移）
- * 叠加而不是覆盖；prefers-reduced-motion 时完全跳过。
+ * 叠加而不是覆盖；「减少」时完全跳过（设置「动画」: 完整是默认，跟随系统才看 prefers-reduced-motion）。
  */
 function playEntryAnimation(element, direction) {
   if (!direction || !ENTRY_OFFSET[direction]) return
-  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return
+  const mode = document.documentElement.dataset.motion
+  if (mode === 'reduced' || (mode === 'system' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)) return
   const offset = ENTRY_OFFSET[direction]
   try {
     element.animate(
@@ -183,7 +187,7 @@ function playEntryAnimation(element, direction) {
 }
 
 export function focusElement(element, { direction = null } = {}) {
-  if (!element) return false
+  if (!isVisible(element)) return false
   element.focus({ preventScroll: true })
   element.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' })
   if (direction) playEntryAnimation(element, direction)
@@ -195,6 +199,44 @@ export function focusFirst(root = activeScopeRoot()) {
   return focusElement(readingOrder(focusables)[0] || null)
 }
 
+/** Is this a slider (MSlider's handle, or a native range input)? */
+export function isSliderElement(element) {
+  if (!element || typeof element.getAttribute !== 'function') return false
+  if (element.getAttribute('aria-disabled') === 'true' || element.disabled) return false
+  return element.getAttribute('role') === 'slider' || (element.tagName === 'INPUT' && element.type === 'range')
+}
+
+const SLIDER_STREAK_MS = 300
+const SLIDER_FAST_FROM = 6
+let sliderStreak = { direction: '', at: 0, count: 0 }
+
+/**
+ * The key a slider gets for a left or right press of the pad: one step at first, ten steps once the same direction has been held down for a while
+ * (a slider of 200 steps is not 200 separate presses). Pure but for the streak it keeps; `now` is a clock reading in milliseconds.
+ */
+export function sliderKeyFor(direction, now) {
+  const same = sliderStreak.direction === direction && now - sliderStreak.at <= SLIDER_STREAK_MS
+  sliderStreak = { direction, at: now, count: same ? sliderStreak.count + 1 : 1 }
+  const fast = sliderStreak.count >= SLIDER_FAST_FROM
+  if (direction === 'right') return fast ? 'PageUp' : 'ArrowRight'
+  return fast ? 'PageDown' : 'ArrowLeft'
+}
+
+/** A slider takes the pad's left and right as its own arrow keys (a pad cannot drag): the value moves, the focus stays. Up and down leave it like any control. */
+function nudgeSlider(slider, direction) {
+  const key = sliderKeyFor(direction, performance.now())
+  if (slider.tagName === 'INPUT') {
+    const step = key.startsWith('Page') ? 10 : 1
+    if (direction === 'right') slider.stepUp(step)
+    else slider.stepDown(step)
+    slider.dispatchEvent(new Event('input', { bubbles: true }))
+    slider.dispatchEvent(new Event('change', { bubbles: true }))
+    return true
+  }
+  slider.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+  return true
+}
+
 export function navigateFocus(direction, root = activeScopeRoot()) {
   const focusables = collectFocusables(root)
   if (focusables.length === 0) return false
@@ -204,7 +246,14 @@ export function navigateFocus(direction, root = activeScopeRoot()) {
     return focusFirst(root)
   }
 
-  const target = bestCandidate(direction, current, focusables)
+  if ((direction === 'left' || direction === 'right') && isSliderElement(current)) return nudgeSlider(current, direction)
+
+  // A control inside the scrolling page area moves to what the page holds first, rows scrolled out of view included; only when the page has nothing
+  // that way does the focus leave it (the rail, the docked action bar). Otherwise the docked bar, always on screen, is the nearest thing below the
+  // last visible row and the rows under it can never be reached.
+  // The rail's RIGHT goes into the page the same way: the page's own controls, not the docked bar that happens to sit at the height of the rail's last items.
+  const page = current.closest('.desktop-window-main') || (direction === 'right' && current.closest('.desktop-sidebar') ? document.querySelector('.desktop-window-main') : null)
+  const target = (page && bestCandidate(direction, current, focusables.filter((element) => page.contains(element)))) || bestCandidate(direction, current, focusables)
   if (target) return focusElement(target, { direction })
 
   // 行末/列尾按左右时按阅读顺序换行，避免「卡住不动」
@@ -271,7 +320,8 @@ function handleFocusIn(event) {
   if (scope.contains(event.target)) return
   // 焦点逃出栈顶作用域（Tab 或程序化聚焦），拉回来
   const focusables = collectFocusables(scope)
-  focusElement(focusables[0] || scope)
+  if (focusables.length > 0) focusElement(focusables[0])
+  else if (isVisible(scope)) scope.focus({ preventScroll: true })
 }
 
 function ensureTrap() {
@@ -315,7 +365,8 @@ export function popFocusScope(element) {
   const previous = scopeReturnFocus.get(element)
   scopeReturnFocus.delete(element)
   releaseTrap()
-  if (previous && previous.isConnected) focusElement(previous)
+  if (previous && isVisible(previous)) focusElement(previous)
+  else focusFirst(activeScopeRoot())
 }
 
 // ===== 视图焦点记忆 =====
@@ -327,7 +378,7 @@ function focusIdentity(element) {
 /** 记住某个视图当前的焦点，供切回时恢复。 */
 export function rememberFocus(viewKey) {
   const current = document.activeElement
-  if (!(current instanceof HTMLElement)) return
+  if (!(current instanceof HTMLElement) || !isVisible(current)) return
   const focusables = collectFocusables()
   focusMemory.set(viewKey, {
     key: focusIdentity(current),
