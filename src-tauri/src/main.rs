@@ -53,6 +53,7 @@ mod panel_page;
 #[cfg(target_os = "windows")]
 mod shell_context_menu;
 mod stall_watch;
+mod start_guide;
 mod sunshine;
 mod version_compare;
 mod sunshine_service;
@@ -79,6 +80,7 @@ mod vmouse;
 mod win_clipboard;
 mod windows;
 mod windows_proxy;
+mod webview_runtime;
 
 use log::info;
 use std::sync::OnceLock;
@@ -453,6 +455,7 @@ fn main() {
             tray::main_panel_loading,
             tray::main_panel_ready,
             panel_page::take_pending_panel_page,
+            start_guide::take_pending_start_guide,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
