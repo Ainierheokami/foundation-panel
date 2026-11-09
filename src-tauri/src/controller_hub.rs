@@ -33,6 +33,12 @@ pub struct MicrophoneStatus {
     pub submit_errors: u32,
     pub last_error: i32,
     pub error_code: String,
+    /// Peak of the client microphone input since the previous status read (0..1).
+    pub input_peak: f64,
+    /// Milliseconds since the last client microphone frame; -1 when none arrived.
+    pub input_active_ms: i64,
+    /// Total client microphone frames received since the host process started.
+    pub input_frames: u64,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Clone)]
@@ -41,6 +47,15 @@ pub struct MicrophoneTestResult {
     pub success: bool,
     pub error_code: String,
     pub backend: String,
+    /// "tone" after a test sound was played; "live" when a stream owns the route.
+    pub mode: String,
+    pub input_peak: f64,
+    pub input_active_ms: i64,
+    /// Tone diagnostics: seconds heard, judged windows and the tone amplitude found.
+    pub heard_seconds: f64,
+    pub windows_total: i32,
+    pub windows_good: i32,
+    pub heard_amplitude: f64,
 }
 
 async fn device_api_url(path: &str) -> Result<String, String> {
@@ -59,6 +74,37 @@ pub async fn get_virtual_microphone_status() -> Result<MicrophoneStatus, String>
     read_device_api_response(response, "virtual microphone status").await
 }
 
+/// The audio endpoints of the host (GET /api/audio/devices): render and capture lists with the known virtual devices
+/// flagged, and the VB-CABLE state. Passed through as the host sends it; the pages read the fields they need.
+#[tauri::command]
+pub async fn get_audio_devices() -> Result<serde_json::Value, String> {
+    let endpoint = device_api_url("/api/audio/devices").await?;
+    let response = sunshine::create_https_client()?
+        .get(endpoint)
+        .send()
+        .await
+        .map_err(|error| format!("Unable to query audio devices: {error}"))?;
+    read_device_api_response(response, "audio devices").await
+}
+
+/// Ask the host to install VB-CABLE ("install": download from VB-Audio, check the signature, silent setup) or to enable its
+/// disabled device ("enable": pnputil). The page has asked the person first; the host starts nothing without `confirm`.
+/// The progress is `vb_cable.job` of GET /api/audio/devices.
+#[tauri::command]
+pub async fn start_vb_cable_job(action: String) -> Result<serde_json::Value, String> {
+    if action != "install" && action != "enable" {
+        return Err(format!("Invalid VB-CABLE action: {action}"));
+    }
+    let endpoint = device_api_url(&format!("/api/audio/vb-cable/{action}")).await?;
+    let response = sunshine::create_https_client()?
+        .post(endpoint)
+        .json(&serde_json::json!({ "confirm": true }))
+        .send()
+        .await
+        .map_err(|error| format!("Unable to start the VB-CABLE job: {error}"))?;
+    read_device_api_response(response, "VB-CABLE job").await
+}
+
 #[tauri::command]
 pub async fn test_virtual_microphone() -> Result<MicrophoneTestResult, String> {
     let endpoint = device_api_url("/api/microphone/test").await?;
@@ -68,6 +114,25 @@ pub async fn test_virtual_microphone() -> Result<MicrophoneTestResult, String> {
         .await
         .map_err(|error| format!("Unable to test the virtual microphone: {error}"))?;
     read_device_api_response(response, "virtual microphone test").await
+}
+
+const MICROPHONE_BACKENDS: [&str; 4] = ["auto", "vb_cable", "usbip_experimental", "disabled"];
+
+/// 保存麦克风重定向后端（写入 sunshine.conf 的 microphone_redirect_backend）。
+#[tauri::command]
+pub async fn save_microphone_backend(backend: String) -> Result<(), String> {
+    if !MICROPHONE_BACKENDS.contains(&backend.as_str()) {
+        return Err(format!("Invalid microphone backend: {backend}"));
+    }
+    let _config_guard = DEVICE_CONFIG_LOCK.lock().await;
+    let mut config = crate::vdd::read_full_sunshine_config().await?;
+    config.insert(
+        "microphone_redirect_backend".to_string(),
+        serde_json::json!(backend),
+    );
+    sunshine::post_sunshine_config(&config).await?;
+    info!("麦克风重定向后端已保存: {backend}");
+    Ok(())
 }
 
 const GAMEPAD_MODES: [&str; 4] = ["auto", "x360", "ds4", "ds5"];
@@ -204,4 +269,17 @@ pub async fn save_controller_hub_config(
     }
     info!("✅ 控制器中心配置已保存: {:?}", changed);
     Ok("saved".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MICROPHONE_BACKENDS;
+
+    #[test]
+    fn microphone_backends_are_the_four_host_values() {
+        assert_eq!(
+            MICROPHONE_BACKENDS,
+            ["auto", "vb_cable", "usbip_experimental", "disabled"]
+        );
+    }
 }
