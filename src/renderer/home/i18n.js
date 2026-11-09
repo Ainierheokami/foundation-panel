@@ -30,8 +30,8 @@ export const translations = {
         },
         {
           icon: '🖥️',
-          title: '基地显示器（ZakoVDD）',
-          description: '内置基地显示器管理，无需额外软件即可创建和管理虚拟显示器'
+          title: '基地虚拟显示器',
+          description: '内置基地虚拟显示器管理，无需额外软件即可创建和管理虚拟显示器'
         },
         {
           icon: '🎤',
@@ -67,7 +67,7 @@ export const translations = {
         '系统: Windows10 22H2+',
         'CPU: Intel Core i3 / AMD Ryzen 3 以上',
         'GPU: 支持硬件编码的显卡, 支持VCE 1.0或更高版本, Intel VAAPI / AMD VCE / <a target="_blank" href="https://developer.nvidia.com/video-encode-and-decode-gpu-support-matrix-new">Nvidia NVENC</a>',
-        'RAM: 4GB 或更多',
+        'RAM: 4 GB 或更多',
         '网络: 5GHz, 802.11ac'
       ],
       windowsLatest: 'Windows 最新版',
@@ -138,8 +138,8 @@ export const translations = {
         },
         {
           icon: '🖥️',
-          title: 'Virtual Display',
-          description: 'Built-in virtual display management without additional software'
+          title: 'Foundation Virtual Display',
+          description: 'Built-in Foundation Virtual Display management, a virtual display, without additional software'
         },
         {
           icon: '🎤',
@@ -175,7 +175,7 @@ export const translations = {
         'OS: Windows 10 22H2+',
         'CPU: Intel Core i3 / AMD Ryzen 3 or higher',
         'GPU: Hardware encoding support, VCE 1.0+, Intel VAAPI / AMD VCE / <a target="_blank" href="https://developer.nvidia.com/video-encode-and-decode-gpu-support-matrix-new">Nvidia NVENC</a>',
-        'RAM: 4GB or more',
+        'RAM: 4 GB or more',
         'Network: 5GHz, 802.11ac'
       ],
       windowsLatest: 'Windows Latest',
