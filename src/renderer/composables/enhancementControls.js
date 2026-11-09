@@ -74,6 +74,8 @@ const messages = {
     components: '增强功能',
     session: '当前串流',
     settings: '浮层与快捷键',
+    componentsMissing: '运行库尚未安装。DLSS NR 和 RTX HDR 在“组件状态”中安装。',
+    openComponents: '前往组件状态',
     componentHint: '默认增强方案按应用配置；这里统一管理组件与实时控制。',
     hdrIntro: '将 SDR 内容转换为 HDR 输出。',
     nrIntro: '增强画面细节，支持 SDR 与原生 HDR。',
@@ -127,6 +129,7 @@ const messages = {
       nr_session_ended: '已选串流结束，请重新选择',
       nr_no_session: '当前没有串流',
       nr_settings_pending: '正在应用设置，请稍后再试',
+      hdr_save_busy: '正在保存…',
       nr_toggle_unsupported: '此串流不支持 NR 切换'
     },
     failed: '操作失败，请重试'
@@ -160,6 +163,8 @@ const messages = {
     components: 'Enhancements',
     session: 'Current streams',
     settings: 'Overlay & shortcuts',
+    componentsMissing: 'The runtime is not installed. DLSS NR and RTX HDR are installed under Component status.',
+    openComponents: 'Component status',
     componentHint:
       'Default effects are configured per app. Manage components and live controls here.',
     hdrIntro: 'Convert SDR content to HDR output.',
@@ -219,6 +224,7 @@ const messages = {
       nr_session_ended: 'The selected stream ended. Select another stream.',
       nr_no_session: 'No active stream',
       nr_settings_pending: 'Settings are being applied. Try again shortly.',
+      hdr_save_busy: 'Saving…',
       nr_toggle_unsupported: 'NR switching is unavailable for this stream'
     },
     failed: 'Operation failed. Try again.'

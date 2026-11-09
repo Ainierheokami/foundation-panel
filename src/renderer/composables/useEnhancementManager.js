@@ -1,5 +1,5 @@
 import { computed, onMounted, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from './notifyMessage.js'
 import { open } from '@tauri-apps/plugin-dialog'
 import { openExternalUrl, sunshine } from '../tauri-adapter.js'
 
@@ -15,12 +15,13 @@ const emptyStatus = () => ({
   runtime_present: false,
 })
 
-export function useEnhancementManager({ api, messages: text, runtimeName }) {
+export function useEnhancementManager({ api, messages: text, runtimeName, onStatus }) {
   const status = ref(emptyStatus())
   const statusKnown = ref(false)
   const applyStatus = (data) => {
     status.value = { ...emptyStatus(), ...data }
     statusKnown.value = true
+    onStatus?.(status.value)
   }
   const refreshing = ref(false)
   const operation = ref('')
@@ -113,6 +114,7 @@ export function useEnhancementManager({ api, messages: text, runtimeName }) {
     try {
       await ElMessageBox.confirm(text.value.uninstallConfirm, text.value.uninstallTitle, {
         type: 'warning',
+        danger: true,
         confirmButtonText: text.value.uninstall,
       })
     } catch {
@@ -144,7 +146,14 @@ export function useEnhancementManager({ api, messages: text, runtimeName }) {
     operation.value = 'saving'
     operationError.value = ''
     try {
-      const result = await api.setEnabled(enabled)
+      // The host answers `hdr_save_busy` while another save holds its transaction (the panel already asked again for about 10 s). A save is never dropped silently: the page says 「正在保存…」
+      // and asks once more after the other one has finished.
+      let result = await api.setEnabled(enabled)
+      if (!result.success && String(result.message || '').includes('hdr_save_busy')) {
+        ElMessage.info(text.value.saveBusy || '正在保存…')
+        await new Promise((resolve) => setTimeout(resolve, 1500))
+        result = await api.setEnabled(enabled)
+      }
       if (!result.success) throw new Error(result.message)
       applyStatus(result.data)
       ElMessage.success(text.value.saveSuccess)
