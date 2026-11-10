@@ -1,29 +1,12 @@
-import {
-  Monitor,
-  Setting,
-  Operation,
-  Timer,
-  DataLine,
-  Cpu,
-  Connection,
-  MagicStick,
-  Brush,
-  House,
-  Grid,
-  QuestionFilled,
-  Download,
-} from '@element-plus/icons-vue'
-import IconGamepad from '../desktop/icons/IconGamepad.vue'
-import IconTools from '../desktop/icons/IconTools.vue'
 import { ROUTES } from './useRouter.js'
 import { WEBUI_PAGES, getWebuiPage } from './webuiNavigation.js'
 
 const WEBUI_ICONS = {
-  overview: House,
-  downloads: Download,
-  apps: Grid,
-  pairing: Connection,
-  'stream-settings': Operation,
+  overview: 'home',
+  downloads: 'download',
+  apps: 'grid_view',
+  pairing: 'link',
+  'stream-settings': 'tune',
 }
 
 /** Navigation represents destinations; actions and feature status live on their pages. */
@@ -52,10 +35,10 @@ export function createNavigationGroups(ctx) {
       id: 'devices',
       label: labels.sectionDevices,
       items: [
-        routeItem('vdd', Monitor, labels.virtualDisplay, ROUTES.VDD_SETTINGS),
+        routeItem('vdd', 'monitor', labels.virtualDisplay, ROUTES.VDD_SETTINGS),
         {
           id: 'device-hub',
-          icon: IconGamepad,
+          icon: 'sports_esports',
           label: labels.deviceHub,
           action: ctx.openControllers,
           isActive: () => ctx.router.isRoute(ROUTES.CONTROLLERS),
@@ -66,9 +49,9 @@ export function createNavigationGroups(ctx) {
       id: 'assist',
       label: labels.sectionAssist,
       items: [
-        routeItem('toolbox', IconTools, labels.toolbox, ROUTES.TOOLBOX),
-        routeItem('ai-assistant', MagicStick, labels.aiAssistant, ROUTES.AI_ASSISTANT),
-        ...(import.meta.env.DEV ? [routeItem('web-stream', Connection, labels.webStream, ROUTES.WEB_STREAM)] : []),
+        routeItem('toolbox', 'build', labels.toolbox, ROUTES.TOOLBOX),
+        routeItem('ai-assistant', 'wand_stars', labels.aiAssistant, ROUTES.AI_ASSISTANT),
+        ...(import.meta.env.DEV ? [routeItem('web-stream', 'link', labels.webStream, ROUTES.WEB_STREAM)] : []),
       ],
     },
   ]
@@ -78,15 +61,29 @@ export function createUtilityTools(ctx) {
   const labels = ctx.t.value.sidebar
   return [
     {
+      id: 'latency-clock',
+      icon: 'timer',
+      label: labels.latencyClock,
+      description: labels.latencyClockDescription,
+      action: () => ctx.router.navigate(ROUTES.LATENCY_CLOCK),
+    },
+    {
+      id: 'test-tools',
+      icon: 'science',
+      label: labels.testTools,
+      description: labels.testToolsDescription,
+      action: () => ctx.router.navigate(ROUTES.TEST_TOOLS),
+    },
+    {
       id: 'stream-timer',
-      icon: Timer,
+      icon: 'timer',
       label: labels.streamTimer,
       description: labels.timerDescription,
-      action: ctx.openTimer,
+      action: () => ctx.router.navigate(ROUTES.STREAM_TIMER),
     },
     {
       id: 'latency-test',
-      icon: DataLine,
+      icon: 'stacked_line_chart',
       label: labels.latencyTest,
       description: labels.latencyDescription,
       external: true,
@@ -94,14 +91,14 @@ export function createUtilityTools(ctx) {
     },
     {
       id: 'gamepad-test',
-      icon: Cpu,
+      icon: 'memory',
       label: labels.gamepadTest,
       description: labels.gamepadDescription,
       action: ctx.openGamepadTest,
     },
     {
       id: 'stylus-input-probe',
-      icon: Brush,
+      icon: 'palette',
       label: ctx.t.value.tools.stylusInputProbe,
       description: labels.stylusDescription,
       action: ctx.openStylusInputProbe,
@@ -113,7 +110,7 @@ export function createFooterTools(ctx) {
   return [
     {
       id: 'panel-settings',
-      icon: Setting,
+      icon: 'settings',
       label: ctx.t.value.sidebar.panelSettings,
       action: () => ctx.router.navigate(ROUTES.PANEL_SETTINGS),
       isActive: () =>
@@ -122,7 +119,7 @@ export function createFooterTools(ctx) {
     },
     {
       id: 'help',
-      icon: QuestionFilled,
+      icon: 'help',
       label: ctx.t.value.sidebar.helpAbout,
       action: () => ctx.router.navigate(ROUTES.HELP),
       isActive: () =>

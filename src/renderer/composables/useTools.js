@@ -1,6 +1,8 @@
 import { ref } from 'vue'
-import { ElMessage, ElMessageBox, ElLoading, ElNotification } from 'element-plus'
-import { openExternalUrl, tools, controllerMeta } from '@/tauri-adapter.js'
+import { ElMessage, ElNotification, ElMessageBox } from './notifyMessage.js'
+import { openExternalUrl, tools, controllerMeta, sunshine } from '@/tauri-adapter.js'
+import { latencyClockTexts } from 'foundation-ui/vue'
+import { pickStreamMonitor, centredOn } from './streamMonitor.js'
 import { useI18n } from '../desktop/i18n/index.js'
 import { formatMessage } from '../shared/format-message.js'
 
@@ -8,22 +10,54 @@ import { formatMessage } from '../shared/format-message.js'
 const clipboardSyncEnabled = ref(false)
 let clipboardSyncInitialised = false
 let clipboardSyncPollTimer = null
+// The gamepad test tool downloads or writes files on disk: while that runs nothing else may interrupt it (a restart would corrupt the write). The flag covers
+// the whole action, from its first synchronous statement — before the first await, so a second click starts no second flow — to its end on every path; the text
+// drives the panel's full-window blocking layer (PanelBusyLayer), which shows the live progress of the work.
+const controllerBusy = ref(false)
+const controllerBusyText = ref('')
+const startBusy = (text) => {
+  controllerBusy.value = true
+  controllerBusyText.value = text
+  return {
+    setText: (words) => { controllerBusyText.value = words },
+    close: () => { controllerBusy.value = false; controllerBusyText.value = '' },
+  }
+}
 
 /**
  * 工具操作 Composable
  */
 export function useTools() {
-  const { t } = useI18n()
+  const { t, locale } = useI18n()
 
   /**
-   * 打开串流计时器
+   * 延迟测试时钟: full screen in a window of its own on the display the stream captures (Sunshine's output_name, streamMonitor.js).
+   * The window is made centred on that monitor and then set full screen, so it fills that monitor; with no match it opens on the primary one and says so.
    */
-  const openTimer = async () => {
-    await createWindow('/stop-clock-canvas/index.html', t.value.sidebar.streamTimer, {
-      prefix: 'timer',
-      width: 1080,
-      height: 600,
-    })
+  const openLatencyClockOnStream = async ({ mode = 'dark' } = {}) => {
+    const lang = String(locale.value || 'zh').slice(0, 2)
+    const T = latencyClockTexts(lang)
+    let pick = { monitor: null, found: false }
+    try {
+      const { availableMonitors, primaryMonitor } = await import('@tauri-apps/api/window')
+      const [monitors, primary] = await Promise.all([availableMonitors(), primaryMonitor()])
+      let config = {}
+      try { const base = await sunshine.getProxyUrl(); const r = await fetch(`${base}/api/config`, { signal: AbortSignal.timeout(3000) }); config = await r.json() } catch { /* the host is not answering: the primary display */ }
+      pick = pickStreamMonitor({ outputName: config.output_name, displayDevices: config.display_devices, monitors, primary })
+    } catch { /* not in Tauri */ }
+    try {
+      const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow')
+      const rect = pick.monitor ? centredOn(pick.monitor, 960, 600) : { width: 960, height: 600 }
+      const win = new WebviewWindow(`latency_${Date.now()}`, {
+        url: `${window.location.origin}/latency-clock/index.html?mode=${encodeURIComponent(mode)}&locale=${lang}`,
+        title: T.title, ...rect, ...(pick.monitor ? {} : { center: true }), decorations: false, focus: true,
+      })
+      win.once('tauri://created', async () => { try { await win.setFullscreen(true); await win.setFocus() } catch (e) { console.error('[LatencyClock] full screen failed:', e) } })
+      win.once('tauri://error', (e) => { console.error('[LatencyClock] window failed:', e); ElMessage.error(formatMessage(t.value.toolActions.windowCreateFailed, { title: T.title })) })
+      if (!pick.found) ElMessage.warning(T.streamFailed)
+    } catch (e) {
+      console.error('[LatencyClock] window failed:', e)
+    }
   }
 
   /**
@@ -107,9 +141,10 @@ export function useTools() {
         t.value.toolActions.cleanupConfirm,
         t.value.toolActions.cleanupTitle,
         {
-          confirmButtonText: t.value.common.confirm,
+          confirmButtonText: t.value.systemTools.cleanup,
           cancelButtonText: t.value.common.cancel,
           type: 'warning',
+          danger: true,
         },
       )
 
@@ -120,31 +155,34 @@ export function useTools() {
         duration: 0,
       })
 
-      // 调用 Tauri 命令
-      const result = await invoke('cleanup_unused_covers')
+      try {
+        // 调用 Tauri 命令
+        const result = await invoke('cleanup_unused_covers')
 
-      loading.close()
-
-      // 显示结果
-      if (result.success) {
-        if (result.deleted_count > 0) {
-          ElMessageBox.alert(
-            formatMessage(t.value.toolActions.cleanupSummary, {
-              count: result.deleted_count,
-              size: (result.freed_space / 1024).toFixed(2),
-            }),
-            t.value.toolActions.cleanupComplete,
-            {
-              confirmButtonText: t.value.common.confirm,
-              type: 'success',
-            },
-          )
+        // 显示结果
+        if (result.success) {
+          if (result.deleted_count > 0) {
+            ElMessageBox.alert(
+              formatMessage(t.value.toolActions.cleanupSummary, {
+                count: result.deleted_count,
+                size: (result.freed_space / 1024).toFixed(2),
+              }),
+              t.value.toolActions.cleanupComplete,
+              {
+                confirmButtonText: t.value.common.confirm,
+                type: 'success',
+              },
+            )
+          } else {
+            ElMessage.success(t.value.toolActions.cleanupEmpty)
+          }
         } else {
-          ElMessage.success(t.value.toolActions.cleanupEmpty)
+          console.error('Cleanup failed:', result.message)
+          ElMessage.error(t.value.toolActions.cleanupFailed)
         }
-      } else {
-        console.error('Cleanup failed:', result.message)
-        ElMessage.error(t.value.toolActions.cleanupFailed)
+      } finally {
+        // the message with duration 0 ends on every path: a failed clean leaves the queue free for the notices that follow
+        loading.close()
       }
     } catch (error) {
       if (error !== 'cancel') {
@@ -209,57 +247,16 @@ export function useTools() {
   }
 
   /**
-   * 公共窗口创建函数
-   * @param {string} url - 窗口URL路径
-   * @param {string} title - 窗口标题
-   * @param {object} options - 窗口配置选项
-   */
-  const createWindow = async (url, title, options = {}) => {
-    try {
-      const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow')
-      const baseUrl = window.location.origin
-      const windowId = `${options.prefix || 'window'}_${Date.now()}`
-
-      const newWindow = new WebviewWindow(windowId, {
-        url: `${baseUrl}${url}`,
-        title,
-        width: options.width || 1080,
-        height: options.height || 800,
-        decorations: options.decorations !== false,
-        center: true,
-      })
-
-      // 等待窗口创建完成后显示
-      newWindow.once('tauri://created', async () => {
-        console.log(`✅ ${title}窗口已创建`)
-        await newWindow.show()
-        await newWindow.setFocus()
-        console.log(`✅ ${title}窗口已显示`)
-      })
-
-      newWindow.once('tauri://error', (e) => {
-        console.error(`❌ ${title}窗口创建失败:`, e)
-        ElMessage.error(formatMessage(t.value.toolActions.windowCreateFailed, { title }))
-      })
-    } catch (error) {
-      console.error(`❌ 打开${title}失败:`, error)
-      ElMessage.error(formatMessage(t.value.toolActions.windowOpenFailed, { title }))
-    }
-  }
-
-  /**
    * 打开手柄测试工具（ControllerMeta）
    *
    * 流程：
    * 1. 已安装 → 直接启动
    * 2. 未安装 → 询问用户：下载并启动 / 打开网页版 / 取消
-   * 3. 下载过程中通过消息提示进度
+   * 3. 下载过程中全窗口阻塞层显示进度（PanelBusyLayer）
    */
-  const openGamepadTest = async () => {
+  const openGamepadTestFlow = async () => {
     const FALLBACK_WEB = 'https://hardwaretester.com/gamepad'
     const OFFICIAL_SITE = 'https://www.controllermeta.com/'
-
-    ElMessage.info(t.value.controllerMeta.preparing)
 
     // 规范化版本号比较：忽略 v 前缀、按数字段比较
     const normalizeVersion = (v) =>
@@ -305,12 +302,14 @@ export function useTools() {
           ElMessage.error(String(err).includes('ControllerMeta 未安装')
             ? t.value.controllerMeta.notInstalled : t.value.controllerMeta.launchFailed)
         }
+        return true
       } catch (err) {
         unlisten()
         loading.close()
         console.error('[ControllerMeta] download failed:', err)
         ElMessage.error(String(err).includes('无法覆盖已有版本')
           ? t.value.controllerMeta.closeBeforeUpdate : t.value.controllerMeta.downloadFailed)
+        return false
       }
     }
 
@@ -334,20 +333,26 @@ export function useTools() {
           try {
             const release = await controllerMeta.checkRelease()
             if (release?.download_url && status.version && compareVersion(release.version, status.version) > 0) {
-              ElNotification({
+              const notice = ElNotification({
                 title: t.value.controllerMeta.updateTitle,
                 message: formatMessage(t.value.controllerMeta.updateMessage, { current: status.version, latest: release.version }),
                 type: 'info',
                 duration: 0,
-                position: 'bottom-right',
-                dangerouslyUseHTMLString: false,
+                actionText: t.value.controllerMeta.updateAction,
+                standing: 'controllermeta-update',
+                revision: release.version,
                 onClick: async () => {
-                  const loading = ElLoading.service({
-                    lock: true,
-                    text: t.value.controllerMeta.preparingUpdate,
-                    background: 'rgba(0, 0, 0, 0.5)',
-                  })
-                  await downloadAndLaunch(release, loading)
+                  if (controllerBusy.value) return
+                  const loading = startBusy(t.value.controllerMeta.preparingUpdate)
+                  try {
+                    const downloaded = await downloadAndLaunch(release, loading)
+                    if (downloaded) notice?.close?.()
+                  } catch (err) {
+                    console.error('[ControllerMeta] update failed:', err)
+                    ElMessage.error(t.value.controllerMeta.downloadFailed)
+                  } finally {
+                    loading.close()
+                  }
                 },
               })
             }
@@ -380,16 +385,11 @@ export function useTools() {
         return
       }
 
-      // ElMessageBox 在当前 Element Plus 版本中 resolve 的是 action 字符串（如 'confirm'），
-      // 不是 { action: 'confirm' } 对象。旧判断会导致点击「下载并启动」后直接返回，
-      // loading 和下载进度监听都不会创建。
+      // 对话框 resolve 的是 action 字符串（如 'confirm'），不是 { action: 'confirm' } 对象。
+      // 旧判断会导致点击「下载并启动」后直接返回，进度提示和下载进度监听都不会创建。
       if (choice !== 'confirm') return
 
-      const loading = ElLoading.service({
-        lock: true,
-        text: t.value.controllerMeta.checkingRelease,
-        background: 'rgba(0, 0, 0, 0.5)',
-      })
+      const loading = startBusy(t.value.controllerMeta.checkingRelease)
 
       let release
       try {
@@ -409,11 +409,27 @@ export function useTools() {
         return
       }
 
-      await downloadAndLaunch(release, loading)
+      try {
+        await downloadAndLaunch(release, loading)
+      } finally {
+        loading.close()
+      }
     } catch (err) {
       console.error('[ControllerMeta] openGamepadTest failed:', err)
       ElMessage.error(t.value.controllerMeta.unavailable)
       await openExternalUrl(FALLBACK_WEB)
+    }
+  }
+
+  // The busy state is taken before the first await, so a second click while the status is still in flight (or while a dialog is open) starts no second flow,
+  // and it is given back on every path; the blocking layer and its live text are owned by startBusy and its close.
+  const openGamepadTest = async () => {
+    if (controllerBusy.value) return
+    controllerBusy.value = true
+    try {
+      await openGamepadTestFlow()
+    } finally {
+      controllerBusy.value = false
     }
   }
 
@@ -473,7 +489,7 @@ export function useTools() {
   }
 
   return {
-    openTimer,
+    openLatencyClockOnStream,
     openStylusInputProbe,
     openUrl,
     cleanupCovers,
@@ -483,5 +499,7 @@ export function useTools() {
     showClipboardSyncStatus,
     initClipboardSyncStatus,
     clipboardSyncEnabled,
+    controllerBusy,
+    controllerBusyText,
   }
 }
