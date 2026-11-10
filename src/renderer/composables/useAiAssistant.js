@@ -1,9 +1,10 @@
 import { ref, reactive, computed, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage } from './notifyMessage.js'
 import { callLLM, fetchModels } from './aiClient.js'
 import { getAppsContext, getLogsContext, parseAction, executeAction } from './aiActions.js'
 import { AI_PROVIDERS, DEFAULT_CONFIG, STORAGE_KEY } from './aiProviders.js'
 import { useI18n } from '../desktop/i18n/index.js'
+import { mitaBegin, mitaEnd } from './mitaState.js'
 
 // 重新导出供外部使用
 export { AI_PROVIDERS }
@@ -205,6 +206,9 @@ Reply to the user in ${replyLanguage}. All user-facing explanations, command nam
 /**
  * AI 助手 Composable — 状态管理 + 对话逻辑
  */
+/** sessionStorage key of a message another page hands to the chat (体检's result); the chat sends it when it opens. */
+export const MITA_PENDING_PROMPT = 'sunshine-ai-pending-prompt'
+
 export function useAiAssistant() {
   const { t, locale } = useI18n()
   const ui = () => t.value.aiAssistant.runtime
@@ -463,6 +467,8 @@ export function useAiAssistant() {
     chatHistory.value.push({ role: 'user', content: userMessage, timestamp: Date.now() })
     currentInput.value = ''
     isLoading.value = true
+    mitaBegin()
+    let answered = false
 
     try {
       const [appsContext, logsContext] = await Promise.all([getAppsContext(), getLogsContext()])
@@ -481,6 +487,7 @@ export function useAiAssistant() {
       if (action) msg.parsedAction = action
 
       chatHistory.value.push(msg)
+      answered = true
     } catch (error) {
       chatHistory.value.push({
         role: 'assistant',
@@ -488,8 +495,10 @@ export function useAiAssistant() {
         timestamp: Date.now(),
         isError: true,
       })
+      answered = true
     } finally {
       isLoading.value = false
+      mitaEnd(answered)
     }
 
     return true

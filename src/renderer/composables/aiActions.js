@@ -3,8 +3,9 @@
  * 负责解析 AI 返回的 JSON 操作指令，并执行对 Sunshine 的修改
  */
 
-import { ElMessage } from 'element-plus'
+import { ElMessage } from './notifyMessage.js'
 import { useI18n } from '../desktop/i18n/index.js'
+import { scrubText } from 'foundation-ui/telemetry'
 
 function strings() {
   const { locale } = useI18n()
@@ -19,17 +20,17 @@ function strings() {
       unknownAction: '未知操作类型: {action}',
       appNotFound: '未找到应用 "{name}"',
       menuAddedToast: '已添加菜单命令：{names}',
-      menuAdded: '✅ 已成功添加 {count} 条菜单命令到 "{name}"：{names}',
+      menuAdded: '已成功添加 {count} 条菜单命令到 "{name}"：{names}',
       prepAddedToast: '已添加 {count} 条预处理命令',
-      prepAdded: '✅ 已成功添加 {count} 条预处理命令到 "{name}"',
+      prepAdded: '已成功添加 {count} 条预处理命令到 "{name}"',
       noConfigChanges: '无配置修改',
       fetchConfigFailed: '获取配置失败: {status}',
       saveConfigFailed: '保存配置失败: {status}',
       configUpdated: '配置已更新',
-      configApplied: '✅ 已应用修改：{explanation}',
+      configApplied: '已应用修改：{explanation}',
       noAppsToEnhance: '无应用需要增强',
       appsEnhancedToast: '已增强 {count} 个应用的配置',
-      appsEnhanced: '✅ 已成功增强 {updated}/{total} 个应用的配置',
+      appsEnhanced: '已成功增强 {updated}/{total} 个应用的配置',
       join: '、',
     }
   }
@@ -43,17 +44,17 @@ function strings() {
     unknownAction: 'Unknown action type: {action}',
     appNotFound: 'App "{name}" was not found',
     menuAddedToast: 'Added menu commands: {names}',
-    menuAdded: '✅ Added {count} menu commands to "{name}": {names}',
+    menuAdded: 'Added {count} menu commands to "{name}": {names}',
     prepAddedToast: 'Added {count} pre-processing commands',
-    prepAdded: '✅ Added {count} pre-processing commands to "{name}"',
+    prepAdded: 'Added {count} pre-processing commands to "{name}"',
     noConfigChanges: 'No configuration changes',
     fetchConfigFailed: 'Failed to fetch configuration: {status}',
     saveConfigFailed: 'Failed to save configuration: {status}',
     configUpdated: 'Configuration updated',
-    configApplied: '✅ Applied changes: {explanation}',
+    configApplied: 'Applied changes: {explanation}',
     noAppsToEnhance: 'No apps to enhance',
     appsEnhancedToast: 'Enhanced {count} app configurations',
-    appsEnhanced: '✅ Enhanced {updated}/{total} app configurations',
+    appsEnhanced: 'Enhanced {updated}/{total} app configurations',
     join: ', ',
   }
 }
@@ -117,7 +118,7 @@ export async function getLogsContext(maxLines = 150) {
     if (!resp.ok) return ''
     const text = await resp.text()
     const lines = text.split('\n')
-    const recent = lines.slice(-maxLines).join('\n')
+    const recent = scrubText(lines.slice(-maxLines).join('\n'), Math.max(200000, text.length))
     const msg = strings()
     return `\n\n${format(msg.logsHeader, { count: Math.min(lines.length, maxLines) })}\n\`\`\`\n${recent}\n\`\`\``
   } catch {
