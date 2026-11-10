@@ -17,6 +17,7 @@
           >
             <div class="bubble-icon" v-html="item.icon"></div>
           </div>
+          <span class="bubble-caption" :class="{ danger: item.danger }">{{ captionOf(item.id) }}</span>
         </div>
       </div>
     </transition>
@@ -47,6 +48,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { cursorPosition } from '@tauri-apps/api/window'
 import { PhysicalPosition } from '@tauri-apps/api/dpi'
 import { useI18n } from '../desktop/i18n/index.js'
+import { ICONS } from 'foundation-ui/icons/icons.js'
 import { callVisionLLM, isApiKeyRequired } from '../composables/aiClient.js'
 import { STORAGE_KEY, DEFAULT_CONFIG } from '../composables/aiProviders.js'
 import {
@@ -90,7 +92,7 @@ const loadPixi = async () => {
   return pixiModulePromise
 }
 
-// 基地娘资源 URL
+// 桌宠资源 URL
 const SPRITESHEET_URL =
   'https://assets.alkaidlab.com/toolbar-spritesheet.webp'
 const getSpritesheetRequestUrl = () => `${SPRITESHEET_URL}?t=${Date.now()}`
@@ -739,44 +741,55 @@ const initSpeechBroadcast = () => {
   } catch (_) {}
 }
 
+// the menu's glyphs are Material Symbols (Rounded, 400) of the shared set, drawn as markup because the bubbles take html; white on the bubble
+const glyph = (name) => `<svg viewBox="0 -960 960 960" xmlns="http://www.w3.org/2000/svg"><path fill="white" d="${ICONS[name].d}"/></svg>`
+
 const menuItems = computed(() => [
   {
     id: 'main',
     label: t.value.toolbar.controlPanel,
-    icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="white" d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>',
+    icon: glyph('home'),
   },
   {
     id: 'vdd',
     label: t.value.toolbar.virtualDisplay,
-    icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="white" d="M20 18c1.1 0 1.99-.9 1.99-2L22 6c0-1.1-.9-2-2-2H4c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2H0v2h24v-2h-4zM4 6h16v10H4V6z"/></svg>',
+    icon: glyph('desktop_windows'),
   },
   {
     id: 'dpi',
     label: t.value.toolbar.adjustDpi,
-    icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="white" d="M21 3H3c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H3V5h18v14zM5 7h5v5H5zm6 0h8v2h-8zm0 3h8v2h-8zM5 13h5v5H5zm6 0h8v2h-8z"/></svg>',
+    icon: glyph('aspect_ratio'),
   },
   {
     id: 'bitrate',
     label: t.value.toolbar.bitrateAdjust,
-    icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="white" d="M9 3L5 6.99h3V14h2V6.99h3L9 3zm7 14.01V10h-2v7.01h-3L15 21l4-3.99h-3z"/></svg>',
+    icon: glyph('swap_vert'),
   },
   {
     id: 'shortcuts',
     label: t.value.toolbar.shortcutGuide,
-    icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="white" d="M20 5H4c-1.1 0-1.99.9-1.99 2L2 17c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm-9 3h2v2h-2V8zm0 3h2v2h-2v-2zM8 8h2v2H8V8zm0 3h2v2H8v-2zm-1 2H5v-2h2v2zm0-3H5V8h2v2zm9 7H8v-2h8v2zm0-4h-2v-2h2v2zm0-3h-2V8h2v2zm3 3h-2v-2h2v2zm0-3h-2V8h2v2z"/></svg>',
+    icon: glyph('keyboard'),
   },
   {
     id: 'pet-settings',
     label: t.value.toolbar.petSettings,
-    icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="white" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94 0 .31.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>',
+    icon: glyph('settings'),
   },
   {
     id: 'close',
     label: t.value.toolbar.close,
-    icon: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="white" d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>',
+    icon: glyph('close'),
     danger: true,
   },
 ])
+
+// what each bubble does, in words under it: a right click (or a long press) opens the menu, and 隐藏桌宠 and 桌宠设置… are there to read, not to guess from an icon
+const captionOf = (id) => t.value.toolbar.captions?.[id] || ''
+
+// a long press on the pet opens the menu, as a right click does with a mouse
+let longPressTimer = null
+let longPressFired = false
+const clearLongPress = () => { if (longPressTimer !== null) { clearTimeout(longPressTimer); longPressTimer = null } }
 
 const toggleMenu = () => {
   menuVisible.value = !menuVisible.value
@@ -881,7 +894,7 @@ const createSpriteFrameSet = async (imageSource) => {
       baseTexture.height % 4 !== 0
     ) {
       throw invalidSpritesheetError(
-        `基地娘资源必须是可被 4×4 整分的图集: ${baseTexture.width}x${baseTexture.height}`,
+        `桌宠资源必须是可被 4×4 整分的图集: ${baseTexture.width}x${baseTexture.height}`,
       )
     }
 
@@ -934,12 +947,12 @@ const createSpriteFrameSetFromBlob = async (blob) => {
   try {
     imageBitmap = await createImageBitmap(blob)
   } catch (error) {
-    throw invalidSpritesheetError(`基地娘资源无法解码: ${error?.message || String(error)}`)
+    throw invalidSpritesheetError(`桌宠资源无法解码: ${error?.message || String(error)}`)
   }
   return createSpriteFrameSet(imageBitmap)
 }
 
-// 后台更新基地娘缓存（ETag 条件请求）
+// 后台更新桌宠缓存（ETag 条件请求）
 const updateSpritesheetCacheInBackground = async (cachedEtag) => {
   if (componentDisposed) return false
   let pendingFrameSet = null
@@ -969,9 +982,9 @@ const updateSpritesheetCacheInBackground = async (cachedEtag) => {
       }
 
       if (applySpriteFrameSet(pendingFrameSet)) {
-        console.info('✅ [桌宠] 基地娘缓存和当前显示已更新')
+        console.info('✅ [桌宠] 桌宠缓存和当前显示已更新')
       } else {
-        console.info('ℹ️ [桌宠] 基地娘缓存已更新，当前显示不可用，下次启动时加载')
+        console.info('ℹ️ [桌宠] 桌宠缓存已更新，当前显示不可用，下次启动时加载')
       }
       pendingFrameSet = null
       return true // 表示有更新
@@ -979,12 +992,12 @@ const updateSpritesheetCacheInBackground = async (cachedEtag) => {
     return false // 304 未修改
   } catch (error) {
     if (pendingFrameSet) destroySpriteFrames(pendingFrameSet.frames)
-    console.warn('⚠️ [桌宠] 基地娘后台更新失败:', error?.message || String(error))
+    console.warn('⚠️ [桌宠] 桌宠后台更新失败:', error?.message || String(error))
     return false
   }
 }
 
-// 生成本地备用基地娘（当网络和缓存都不可用时）
+// 生成本地备用桌宠（当网络和缓存都不可用时）
 // 用 Canvas 绘制 4x4 共 16 帧简单表情图案
 const generateFallbackSpritesheet = () => {
   const frameSize = 64
@@ -1031,7 +1044,7 @@ const generateFallbackSpritesheet = () => {
     }
   }
 
-  console.info('🎨 [桌宠] 已生成本地备用基地娘:', canvas.width, 'x', canvas.height)
+  console.info('🎨 [桌宠] 已生成本地备用桌宠:', canvas.width, 'x', canvas.height)
   return canvas
 }
 
@@ -1088,9 +1101,9 @@ const initPixiApp = async () => {
       if (stopPixiInitialization(app, frameSet)) return false
       cachedEtag = cachedEntry.etag || null
       loadedFromCache = true
-      console.info('⚡ [桌宠] 基地娘缓存加载成功:', frameSet.width, 'x', frameSet.height, 'etag:', cachedEtag)
+      console.info('⚡ [桌宠] 桌宠缓存加载成功:', frameSet.width, 'x', frameSet.height, 'etag:', cachedEtag)
     } catch (error) {
-      console.warn('⚠️ [桌宠] 基地娘缓存加载失败，将重新下载:', error?.message || String(error))
+      console.warn('⚠️ [桌宠] 桌宠缓存加载失败，将重新下载:', error?.message || String(error))
       frameSet = null
       if (error?.invalidSpritesheet) {
         await deleteCacheEntry(CACHE_KEY_SPRITE)
@@ -1101,7 +1114,7 @@ const initPixiApp = async () => {
 
   if (!frameSet) {
     // 无缓存，全量下载
-    console.info('📥 [桌宠] 通过 Rust 代理下载基地娘...')
+    console.info('📥 [桌宠] 通过 Rust 代理下载桌宠...')
     try {
       const result = await invoke('fetch_remote_bytes', {
         url: getSpritesheetRequestUrl(),
@@ -1115,13 +1128,13 @@ const initPixiApp = async () => {
         if (stopPixiInitialization(app)) return false
         frameSet = await createSpriteFrameSetFromBlob(blob)
         if (stopPixiInitialization(app, frameSet)) return false
-        console.info('✅ [桌宠] 基地娘下载成功:', frameSet.width, 'x', frameSet.height)
+        console.info('✅ [桌宠] 桌宠下载成功:', frameSet.width, 'x', frameSet.height)
 
         await setCacheEntry(CACHE_KEY_SPRITE, blob, result.etag)
         if (stopPixiInitialization(app, frameSet)) return false
       }
     } catch (proxyErr) {
-      console.error('❌ [桌宠] 基地娘下载失败:', proxyErr?.message || String(proxyErr))
+      console.error('❌ [桌宠] 桌宠下载失败:', proxyErr?.message || String(proxyErr))
       if (stopPixiInitialization(app, frameSet)) return false
     }
   }
@@ -1136,13 +1149,13 @@ const initPixiApp = async () => {
 
   // 如果远程和缓存都失败了，使用本地生成的 fallback
   if (!frameSet) {
-    console.warn('⚠️ [桌宠] 远程和缓存均不可用，使用本地备用基地娘')
+    console.warn('⚠️ [桌宠] 远程和缓存均不可用，使用本地备用桌宠')
     try {
       const fallbackCanvas = generateFallbackSpritesheet()
       frameSet = await createSpriteFrameSet(fallbackCanvas)
       if (stopPixiInitialization(app, frameSet)) return false
     } catch (fallbackErr) {
-      console.error('❌ [桌宠] 本地备用基地娘也失败:', fallbackErr?.message || String(fallbackErr))
+      console.error('❌ [桌宠] 本地备用桌宠也失败:', fallbackErr?.message || String(fallbackErr))
       cleanupPixiApp()
       return false
     }
@@ -1217,7 +1230,7 @@ const startResourceRefresh = () => {
     await loadSpeechPhrases()
     if (componentDisposed) return
 
-    // 刷新基地娘缓存，并同步更新当前显示
+    // 刷新桌宠缓存，并同步更新当前显示
     try {
       const cachedSprite = await getCacheEntry(CACHE_KEY_SPRITE)
       if (componentDisposed) return
@@ -1584,6 +1597,11 @@ const onDragStart = (e) => {
     dragPointerTarget.setPointerCapture(dragPointerId)
   } catch {}
 
+  longPressFired = false
+  clearLongPress()
+  if (e.pointerType === 'touch' && !menuVisible.value) {
+    longPressTimer = setTimeout(() => { longPressTimer = null; if (!hasMoved && dragPointerId === pointerId && !menuVisible.value) { longPressFired = true; toggleMenu() } }, 550)
+  }
   document.addEventListener('pointermove', onDragMove, { passive: false })
   document.addEventListener('pointerup', onDragEnd)
   document.addEventListener('pointercancel', onDragEnd)
@@ -1680,6 +1698,7 @@ const onDragMove = (e) => {
     const dy = e.screenY - dragStartScreenY
     if (!hasMoved && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return
     hasMoved = true
+    clearLongPress()
     e.preventDefault()
     const generation = dragGeneration
     const pointerId = dragPointerId
@@ -1713,6 +1732,7 @@ const onDragMove = (e) => {
 }
 
 const onDragEnd = async (e) => {
+  clearLongPress()
   if (
     dragPointerId === null ||
     e.pointerId !== dragPointerId ||
@@ -1787,6 +1807,7 @@ const onDragEnd = async (e) => {
 }
 
 const onIconClick = () => {
+  if (longPressFired) { longPressFired = false; return }
   if (!hasMoved) toggleMenu()
 }
 
@@ -2128,6 +2149,23 @@ onUnmounted(() => {
   .gpu-accelerate();
 }
 
+.bubble-caption {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  margin-top: 2px;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  pointer-events: none;
+  font: 600 11px/14px system-ui, 'Microsoft YaHei UI', sans-serif;
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(60, 20, 90, 0.85), 0 0 2px rgba(60, 20, 90, 0.9);
+
+  &.danger {
+    color: #ffe3e3;
+  }
+}
+
 .bubble-item {
   width: 100%;
   height: 100%;
@@ -2352,4 +2390,43 @@ onUnmounted(() => {
     transform: translate3d(0, -5px, 0) scale(1.05);
   }
 }
+
+// The pet art and interaction stay the same; the chrome follows the shared
+// surface roles so the floating window remains legible in light, dark, and
+// high-contrast black schemes.
+#toolbar-container {
+  color-scheme: light dark;
+  --pet-surface: var(--md-sys-color-surface-container-high, rgba(30, 30, 36, 0.94));
+  --pet-on-surface: var(--md-sys-color-on-surface, #f5f2fa);
+  --pet-primary-container: var(--md-sys-color-primary-container, #4d415f);
+  --pet-on-primary-container: var(--md-sys-color-on-primary-container, #f4eaff);
+  --pet-error-container: var(--md-sys-color-error-container, #5f1b25);
+  --pet-on-error-container: var(--md-sys-color-on-error-container, #ffdad6);
+}
+
+.bubble-item {
+  background: var(--pet-primary-container);
+  color: var(--pet-on-primary-container);
+  border: 1px solid color-mix(in srgb, var(--pet-on-primary-container) 22%, transparent);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--md-sys-color-shadow, #000) 28%, transparent);
+  backdrop-filter: blur(18px) saturate(1.1);
+}
+
+.bubble-item.danger {
+  background: var(--pet-error-container);
+  color: var(--pet-on-error-container);
+  border-color: color-mix(in srgb, var(--pet-on-error-container) 22%, transparent);
+}
+
+.bubble-wrapper:nth-child(n) .bubble-item,
+.bubble-wrapper:nth-child(n) .bubble-item.danger {
+  background: var(--pet-primary-container);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--md-sys-color-shadow, #000) 28%, transparent);
+}
+
+.bubble-wrapper:nth-child(n) .bubble-item.danger { background: var(--pet-error-container); }
+.bubble-caption { color: var(--pet-on-surface); text-shadow: 0 1px 3px color-mix(in srgb, var(--md-sys-color-shadow, #000) 70%, transparent); }
+.bubble-caption.danger { color: var(--pet-on-error-container); }
+.speech-bubble { color: var(--pet-on-surface); background: var(--pet-surface); border: 1px solid var(--md-sys-color-outline-variant, rgba(255,255,255,.18)); box-shadow: 0 8px 28px color-mix(in srgb, var(--md-sys-color-shadow, #000) 30%, transparent); }
+.speech-bubble::after { border-top-color: var(--pet-surface); }
 </style>
