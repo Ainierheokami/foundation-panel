@@ -1,37 +1,20 @@
 <template>
-  <section class="desktop-card fade-in settings-card">
-    <div class="card-header">
-      <div class="card-title">
-        <span class="title-icon">
-          <component :is="icon" />
-        </span>
-        {{ title }}
-      </div>
-      <div v-if="$slots.actions" class="card-actions">
-        <slot name="actions"></slot>
-      </div>
-    </div>
-    <div class="card-content">
-      <slot></slot>
-    </div>
-  </section>
+  <MSection :title="title" :description="lead">
+    <MGroup role="list"><slot /></MGroup>
+    <div v-if="$slots.extra" class="dsk-card__extra"><slot name="extra" /></div>
+  </MSection>
 </template>
 
 <script setup>
+import { MGroup, MSection } from 'foundation-ui/vue'
+
+// A settings section: the label, the rows as one connected group, like the settings of the Web UI, the Panel and the phone. `lead` is one line that says what the whole section does.
 defineProps({
-  title: {
-    type: String,
-    required: true,
-  },
-  icon: {
-    type: [Object, Function, String],
-    required: true,
-  },
+  title: { type: String, required: true },
+  lead: { type: String, default: '' },
 })
 </script>
 
-<style lang="less" scoped>
-.settings-card {
-  margin-bottom: 22px;
-}
+<style scoped>
+.dsk-card__extra { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 </style>

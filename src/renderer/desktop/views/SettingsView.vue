@@ -1,15 +1,9 @@
 <template>
-  <div class="settings-view">
-    <div class="page-header fade-in">
-      <h1 class="page-title">{{ t.settings.pageTitle }}</h1>
-      <p class="page-subtitle">{{ t.settings.pageSubtitle }}</p>
-    </div>
-
+  <DeskPage class="settings-view" :title="t.settings.pageTitle" wide>
     <SettingsAppearanceCard @open-theme-editor="emit('openThemeEditor')" />
 
     <SettingsToggleSection
       :title="t.settings.startup"
-      :icon="Promotion"
       :items="startupSettings"
       :values="settings"
       @update-value="setSettingValue"
@@ -17,30 +11,17 @@
 
     <SettingsToggleSection
       :title="t.settings.bigScreen"
-      :icon="Monitor"
       :items="bigScreenItems"
       :values="bigScreenSettings"
       @update-value="setBigScreenSetting"
     />
 
-    <SettingsLaunchAssistantCard :has-tauri="hasTauri" />
-
-    <SettingsFileSharingCard />
-
     <SettingsToggleSection
       :title="t.settings.notifications"
-      :icon="Bell"
       :items="notificationSettings"
       :values="settings"
       @update-value="setSettingValue"
     />
-
-    <SettingsAdvancedCard
-      :values="settings"
-      @update-value="setSettingValue"
-    />
-
-    <SettingsPetCard />
 
     <SettingsAboutCard
       :app-version="appVersion"
@@ -49,26 +30,28 @@
       @check-update="checkUpdate"
     />
 
-    <SettingsNotice :notice="statusNotice" />
+    <!-- what a sofa does not need often: tool paths, file sharing, the pet, the advanced switches -->
+    <PanelLinkSection :links="['toolPaths', 'fileSharing', 'pet', 'advanced']" />
 
-    <SettingsActions @reset="resetSettings" @save="saveSettings" />
-  </div>
+    <DeskDock>
+      <SettingsNotice :notice="statusNotice" />
+      <SettingsActions @reset="resetSettings" @save="saveSettings" />
+    </DeskDock>
+  </DeskPage>
 </template>
 
 <script setup>
 import { computed, onMounted, onUnmounted } from 'vue'
-import { Bell, Monitor, Promotion } from '@element-plus/icons-vue'
 import { useSettingsState } from '../composables/useSettingsState'
 import { bigScreenSettings, setBigScreenSetting } from '../composables/useBigScreenSettings.js'
 import { useI18n } from '../i18n/index.js'
+import DeskPage from '../components/DeskPage.vue'
+import DeskDock from '../components/DeskDock.vue'
+import PanelLinkSection from '../components/PanelLinkSection.vue'
 import SettingsActions from '../components/settings/SettingsActions.vue'
 import SettingsAboutCard from '../components/settings/SettingsAboutCard.vue'
-import SettingsAdvancedCard from '../components/settings/SettingsAdvancedCard.vue'
 import SettingsAppearanceCard from '../components/settings/SettingsAppearanceCard.vue'
-import SettingsFileSharingCard from '../components/settings/SettingsFileSharingCard.vue'
-import SettingsLaunchAssistantCard from '../components/settings/SettingsLaunchAssistantCard.vue'
 import SettingsNotice from '../components/settings/SettingsNotice.vue'
-import SettingsPetCard from '../components/settings/SettingsPetCard.vue'
 import SettingsToggleSection from '../components/settings/SettingsToggleSection.vue'
 
 const { t } = useI18n()
@@ -76,7 +59,6 @@ const { t } = useI18n()
 const {
   appVersion,
   checking,
-  hasTauri,
   settings,
   statusNotice,
   checkUpdate,
@@ -164,29 +146,3 @@ onUnmounted(() => {
   disposeSettingsState()
 })
 </script>
-
-<style lang="less" scoped>
-.settings-view {
-  max-width: 1000px;
-  margin: 0 auto;
-}
-
-.page-header {
-  margin-bottom: 32px;
-
-  .page-title {
-    font-size: 36px;
-    font-weight: 700;
-    color: var(--fd-text-primary, #fff);
-    margin: 0 0 10px 0;
-  }
-
-  .page-subtitle {
-    font-size: 18px;
-    color: rgba(var(--fd-text-primary-rgb, 255, 255, 255), 0.5);
-    margin: 0;
-  }
-}
-
-</style>
-
