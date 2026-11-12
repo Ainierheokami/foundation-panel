@@ -1,162 +1,100 @@
 <template>
-  <div class="devices-view">
-    <div class="page-header fade-in">
-      <h1 class="page-title">{{ t.devices.pageTitle }}</h1>
-      <p class="page-subtitle">{{ t.devices.pageSubtitle }}</p>
-    </div>
+  <DeskPage class="devices-view" :title="t.devices.pageTitle" wide>
+    <!-- pairing: a code to scan, or a PIN to type; the same sections and rows as every settings page -->
+    <MSection :title="t.devices.qrCodePairing">
+      <MNotice v-if="qrError" tone="error">{{ qrError }}</MNotice>
+      <MGroup>
+        <MItem
+          v-if="!qrActive"
+          action
+          icon="qr_code_2"
+          :title="qrLoading ? t.devices.qrGenerating : t.devices.generateQrCode"
+          :text="t.devices.qrDesc"
+          :disabled="qrLoading"
+          data-focus-key="devices-qr"
+          @click="generateQrCode"
+        />
+        <template v-else>
+          <MItem icon="timer" title="PIN" :text="`${qrRemaining}s`">
+            <template #trail><span class="dsk-pin__code">{{ qrPin }}</span></template>
+          </MItem>
+          <MItem plain stack :title="t.devices.qrCodePairing">
+            <template #control><div class="dsk-qr"><img :src="qrDataUrl" alt="QR Code" /></div></template>
+          </MItem>
+          <MItem action icon="refresh" :title="t.devices.qrRefresh" data-focus-key="devices-qr" @click="generateQrCode" />
+          <MItem action icon="close" :title="t.devices.qrCancel" @click="cancelQrCode" />
+        </template>
+      </MGroup>
+    </MSection>
 
-    <!-- 配对区域 - 双列布局 -->
-    <div class="pairing-section fade-in">
-      <div class="desktop-grid cols-2">
-        <!-- 二维码配对 -->
-        <div class="desktop-card pairing-card">
-          <div class="card-header">
-            <div class="card-title">
-              <span class="title-icon"><Iphone /></span>
-              {{ t.devices.qrCodePairing }}
-            </div>
-          </div>
-          <div class="card-content">
-            <div v-if="qrActive" class="qr-display">
-              <div class="qr-image-wrapper">
-                <img :src="qrDataUrl" alt="QR Code" class="qr-image" />
-              </div>
-              <div class="qr-meta">
-                <div class="qr-pin">
-                  <span class="qr-pin-label">PIN</span>
-                  <span class="qr-pin-value">{{ qrPin }}</span>
-                </div>
-                <div class="qr-timer" :class="{ warning: qrRemaining <= 30 }">
-                  ⏱ {{ qrRemaining }}s
-                </div>
-                <div class="qr-actions">
-                  <button class="desktop-btn" @click="generateQrCode">{{ t.devices.qrRefresh }}</button>
-                  <button class="desktop-btn" @click="cancelQrCode">{{ t.devices.qrCancel }}</button>
-                </div>
-              </div>
-            </div>
-
-            <div v-else-if="qrError" class="qr-error">{{ qrError }}</div>
-
-            <div v-else class="qr-idle">
-              <p>{{ t.devices.qrDesc }}</p>
-              <button
-                class="desktop-btn primary"
-                :disabled="qrLoading"
-                @click="generateQrCode"
-              >
-                {{ qrLoading ? t.devices.qrGenerating : t.devices.generateQrCode }}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <!-- 手动 PIN 配对 -->
-        <div class="desktop-card pairing-card">
-          <div class="card-header">
-            <div class="card-title">
-              <span class="title-icon"><Link /></span>
-              {{ t.devices.pinPairing }}
-            </div>
-          </div>
-          <div class="card-content">
-            <div class="pin-form">
-              <div class="form-row">
-                <label class="form-label">{{ t.devices.pinInput }}</label>
-                <input
-                  v-model="pinInput"
-                  class="form-input"
-                  type="text"
-                  pattern="\d*"
-                  maxlength="4"
-                  :placeholder="t.devices.pinPlaceholder"
-                />
-              </div>
-              <div class="form-row">
-                <label class="form-label">{{ t.devices.deviceName }}</label>
-                <input
-                  v-model="deviceNameInput"
-                  class="form-input"
-                  type="text"
-                  :placeholder="t.devices.deviceNamePlaceholder"
-                />
-              </div>
-              <button
-                class="desktop-btn primary full-width"
-                :disabled="pinSubmitting || !pinInput || !deviceNameInput"
-                @click="submitPin"
-              >
-                {{ pinSubmitting ? t.devices.pairing : t.devices.pairBtn }}
-              </button>
-              <div v-if="pinStatus" class="pin-status" :class="pinStatus.type">
-                {{ pinStatus.message }}
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 已配对设备 -->
-    <div class="section-header fade-in">
-      <h2 class="section-title">{{ t.devices.pairedDevicesTitle }}</h2>
-      <span class="section-count">{{ devices.length }}</span>
-    </div>
-
-    <div class="devices-list">
-      <div
-        v-for="(device, index) in devices"
-        :key="device.uuid"
-        class="desktop-card device-card fade-in"
-        :style="{ animationDelay: `${index * 0.1}s` }"
-      >
-        <div class="device-icon"><Iphone /></div>
-        <div class="device-info">
-          <template v-if="editingUuid === device.uuid">
-            <input
-              v-model="editName"
-              class="name-input"
-              @keyup.enter="saveRename(device)"
-              @keyup.escape="cancelRename"
-              ref="nameInputRef"
+    <MSection :title="t.devices.pinPairing">
+      <MGroup>
+        <MItem plain stack :title="t.devices.pinInput">
+          <template #control><div class="dsk-pin"><MPinPad v-model="pinInput" :length="4" :label="t.devices.pinInput" :disabled="pinSubmitting" data-focus-key="devices-pin" /></div></template>
+        </MItem>
+        <MItem plain stack :title="t.devices.deviceName">
+          <template #control>
+            <MField
+              v-model="deviceNameInput"
+              :label="t.devices.deviceName"
+              :placeholder="t.devices.deviceNamePlaceholder"
+              data-focusable
+              data-focus-key="devices-name"
             />
           </template>
-          <template v-else>
-            <div class="device-name">{{ device.name || t.devices.unnamedDevice }}</div>
-          </template>
-          <div class="device-meta">
-            <span class="device-uuid">{{ device.uuid }}</span>
-          </div>
-        </div>
-        <div class="device-actions">
-          <template v-if="editingUuid === device.uuid">
-            <button class="desktop-btn" @click="saveRename(device)">{{ t.devices.saveBtn }}</button>
-            <button class="desktop-btn" @click="cancelRename">{{ t.devices.cancelBtn }}</button>
-          </template>
-          <template v-else>
-            <button class="desktop-btn" @click="startRename(device)">{{ t.devices.renameBtn }}</button>
-            <button class="desktop-btn danger" @click="unpairDevice(device)">{{ t.devices.unpairBtn }}</button>
-          </template>
-        </div>
-      </div>
+        </MItem>
+        <MItem
+          action
+          icon="link"
+          :title="pinSubmitting ? t.devices.pairing : t.devices.pairBtn"
+          :disabled="pinSubmitting || pinInput.length < 4 || !deviceNameInput"
+          data-focus-key="devices-pair"
+          @click="submitPin"
+        />
+      </MGroup>
+      <MNotice v-if="pinStatus" :tone="pinStatus.type === 'success' ? 'info' : 'error'" :icon="pinStatus.type === 'success' ? 'check_circle' : 'error'">{{ pinStatus.message }}</MNotice>
+    </MSection>
 
-      <div v-if="!loading && devices.length === 0" class="empty-state fade-in">
-        <div class="empty-icon"><Iphone /></div>
-        <p>{{ t.devices.emptyState }}</p>
-      </div>
+    <!-- paired devices -->
+    <MSection :title="`${t.devices.pairedDevicesTitle} · ${devices.length}`">
+      <MGroup v-if="devices.length">
+        <MItem v-for="device in devices" :key="device.uuid" icon="mobile" :title="device.name || t.devices.unnamedDevice" :text="device.uuid" :stack="editingUuid === device.uuid">
+          <template v-if="editingUuid === device.uuid" #control>
+            <MField
+              v-model="editName"
+              class="name-input"
+              :label="t.devices.renameBtn"
+              data-focusable
+              @keyup.enter="saveRename(device)"
+              @keyup.escape="cancelRename"
+            />
+          </template>
+          <template #trail>
+            <template v-if="editingUuid !== device.uuid">
+              <MIconButton icon="edit" :label="t.devices.renameBtn" @click="startRename(device)" />
+              <MIconButton icon="link_off" class="is-danger" :label="t.devices.unpairBtn" @click="unpairDevice(device)" />
+            </template>
+            <template v-else>
+              <MIconButton icon="check" :label="t.devices.saveBtn" @click="saveRename(device)" />
+              <MIconButton icon="close" :label="t.devices.cancelBtn" @click="cancelRename" />
+            </template>
+          </template>
+        </MItem>
+      </MGroup>
 
-      <div v-if="loading" class="empty-state fade-in">
-        <p>{{ t.devices.loading }}</p>
-      </div>
-    </div>
-  </div>
+      <div v-else-if="loading" class="dsk-wait"><MLoading size="32px" :label="t.devices.loading" /><span>{{ t.devices.loading }}</span></div>
+      <MEmpty v-else icon="mobile" :title="t.devices.emptyState" />
+    </MSection>
+  </DeskPage>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
-import { Iphone, Link } from '@element-plus/icons-vue'
+import { MEmpty, MField, MGroup, MIconButton, MItem, MLoading, MNotice, MPinPad, MSection } from 'foundation-ui/vue'
 import QRCode from 'qrcode'
+import { requestConfirm } from '../composables/useConfirm.js'
 import { useI18n } from '../i18n/index.js'
+import DeskPage from '../components/DeskPage.vue'
 
 const { t } = useI18n()
 
@@ -238,7 +176,14 @@ async function saveRename(device) {
 // === 取消配对 ===
 async function unpairDevice(device) {
   const name = device.name || device.uuid
-  if (!confirm(t.value.devices.unpairConfirm.replace('{name}', name))) return
+  // The window's own confirm dialog: a native one cannot be answered with a pad.
+  const confirmed = await requestConfirm({
+    title: t.value.devices.unpairBtn,
+    message: t.value.devices.unpairConfirm.replace('{name}', name),
+    confirmLabel: t.value.devices.unpairBtn,
+    danger: true,
+  })
+  if (!confirmed) return
   try {
     const data = await apiFetch('/api/clients/unpair', {
       method: 'POST',
@@ -363,296 +308,11 @@ onUnmounted(() => {
 })
 </script>
 
-<style lang="less" scoped>
-.devices-view {
-  max-width: 1000px;
-  margin: 0 auto;
-}
-
-.page-header {
-  margin-bottom: 32px;
-
-  .page-title {
-    font-size: 32px;
-    font-weight: 700;
-    color: var(--fd-text-primary, #fff);
-    margin: 0 0 8px 0;
-  }
-
-  .page-subtitle {
-    font-size: 16px;
-    color: rgba(var(--fd-text-primary-rgb, 255, 255, 255), 0.5);
-    margin: 0;
-  }
-}
-
-// 配对区域
-.pairing-section {
-  margin-bottom: 40px;
-}
-
-.pairing-card {
-  display: flex;
-  flex-direction: column;
-}
-
-.qr-idle {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 16px;
-  padding: 24px 0;
-  text-align: center;
-
-  p {
-    margin: 0;
-    color: rgba(var(--fd-text-primary-rgb, 255, 255, 255), 0.4);
-    font-size: 14px;
-  }
-}
-
-.qr-display {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 16px;
-
-  .qr-image-wrapper {
-    padding: 10px;
-    background: #fff;
-    border-radius: 12px;
-  }
-
-  .qr-image {
-    width: 180px;
-    height: 180px;
-    border-radius: 4px;
-    display: block;
-  }
-
-  .qr-meta {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-    justify-content: center;
-  }
-
-  .qr-pin {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-
-    .qr-pin-label {
-      font-size: 13px;
-      color: rgba(var(--fd-text-primary-rgb, 255, 255, 255), 0.5);
-    }
-
-    .qr-pin-value {
-      font-size: 24px;
-      font-weight: 700;
-      font-family: monospace;
-      letter-spacing: 6px;
-      background: linear-gradient(135deg, var(--fd-accent, #00fff5), var(--fd-accent-secondary, #ff00ff));
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-    }
-  }
-
-  .qr-timer {
-    font-size: 13px;
-    color: rgba(var(--fd-text-primary-rgb, 255, 255, 255), 0.6);
-    padding: 4px 10px;
-    border-radius: 6px;
-    background: rgba(var(--fd-accent-rgb, 0, 255, 245), 0.1);
-
-    &.warning {
-      background: rgba(var(--fd-status-warning-rgb, 255, 215, 0), 0.15);
-      color: var(--fd-status-warning, #ffd700);
-    }
-  }
-
-  .qr-actions {
-    display: flex;
-    gap: 8px;
-  }
-}
-
-.qr-error {
-  color: var(--fd-status-danger, #ff6b35);
-  padding: 12px;
-  background: rgba(var(--fd-status-danger-rgb, 255, 107, 53), 0.1);
-  border-radius: 8px;
-}
-
-// PIN 表单
-.pin-form {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.form-row {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.form-label {
-  font-size: 13px;
-  color: rgba(var(--fd-text-primary-rgb, 255, 255, 255), 0.6);
-  font-weight: 500;
-}
-
-.form-input {
-  background: rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(var(--fd-accent-rgb, 0, 255, 245), 0.2);
-  border-radius: 8px;
-  padding: 10px 14px;
-  color: var(--fd-text-primary, #fff);
-  font-size: 14px;
-  outline: none;
-  transition: border-color 0.2s;
-
-  &:focus {
-    border-color: var(--fd-accent, #00fff5);
-    box-shadow: 0 0 8px rgba(var(--fd-accent-rgb, 0, 255, 245), 0.2);
-  }
-
-  &::placeholder {
-    color: rgba(var(--fd-text-primary-rgb, 255, 255, 255), 0.25);
-  }
-}
-
-.full-width {
-  width: 100%;
-}
-
-.pin-status {
-  padding: 10px 14px;
-  border-radius: 8px;
-  font-size: 14px;
-
-  &.success {
-    background: rgba(var(--fd-status-success-rgb, 0, 255, 136), 0.1);
-    color: var(--fd-status-success, #00ff88);
-    border: 1px solid rgba(var(--fd-status-success-rgb, 0, 255, 136), 0.3);
-  }
-
-  &.error {
-    background: rgba(var(--fd-status-danger-rgb, 255, 107, 53), 0.1);
-    color: var(--fd-status-danger, #ff6b35);
-    border: 1px solid rgba(var(--fd-status-danger-rgb, 255, 107, 53), 0.3);
-  }
-}
-
-// 段落标题
-.section-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 16px;
-}
-
-.section-title {
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--fd-text-primary, #fff);
-  margin: 0;
-}
-
-.section-count {
-  font-size: 13px;
-  padding: 2px 10px;
-  border-radius: 10px;
-  background: rgba(var(--fd-accent-rgb, 0, 255, 245), 0.12);
-  color: var(--fd-accent, #00fff5);
-}
-
-// 设备列表
-.devices-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.device-card {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-
-  .device-icon {
-    width: 48px;
-    height: 48px;
-    border-radius: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 24px;
-    background: rgba(var(--fd-accent-rgb, 0, 255, 245), 0.1);
-    flex-shrink: 0;
-  }
-
-  .device-info {
-    flex: 1;
-    min-width: 0;
-
-    .device-name {
-      font-size: 15px;
-      font-weight: 600;
-      color: var(--fd-text-primary, #fff);
-      margin-bottom: 2px;
-    }
-
-    .name-input {
-      font-size: 15px;
-      font-weight: 600;
-      color: var(--fd-text-primary, #fff);
-      background: rgba(0, 0, 0, 0.3);
-      border: 1px solid rgba(var(--fd-accent-rgb, 0, 255, 245), 0.5);
-      border-radius: 6px;
-      padding: 4px 10px;
-      outline: none;
-      margin-bottom: 2px;
-
-      &:focus {
-        border-color: var(--fd-accent, #00fff5);
-        box-shadow: 0 0 8px rgba(var(--fd-accent-rgb, 0, 255, 245), 0.3);
-      }
-    }
-
-    .device-meta {
-      font-size: 12px;
-      color: rgba(var(--fd-text-primary-rgb, 255, 255, 255), 0.3);
-      font-family: monospace;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-  }
-
-  .device-actions {
-    display: flex;
-    gap: 8px;
-    flex-shrink: 0;
-  }
-}
-
-.empty-state {
-  text-align: center;
-  padding: 40px 20px;
-  color: rgba(var(--fd-text-primary-rgb, 255, 255, 255), 0.4);
-
-  .empty-icon {
-    font-size: 48px;
-    margin-bottom: 12px;
-  }
-
-  p {
-    margin: 0;
-    font-size: 14px;
-  }
-}
+<style scoped>
+.dsk-pin { display: flex; justify-content: center; padding: 8px 0; }
+.dsk-pin__code { font: var(--m-title-large); letter-spacing: .14em; color: var(--md-sys-color-on-surface); font-variant-numeric: tabular-nums; }
+.dsk-qr { display: flex; justify-content: center; padding: 8px 0; }
+.dsk-qr img { display: block; width: 200px; height: 200px; padding: 12px; border-radius: var(--md-sys-shape-corner-large); background: #fff; }
+.dsk-wait { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 24px; font: var(--m-body-large); color: var(--md-sys-color-on-surface-variant); }
+.is-danger { --m-icon-btn-fg: var(--md-sys-color-error); color: var(--md-sys-color-error); }
 </style>
-
