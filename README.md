@@ -1,183 +1,82 @@
-# Sunshine Control Panel (Tauri)
+# Foundation Panel
 
-基于 Tauri 2 + Vue 3 的 Sunshine Foundation 大屏桌面管理器，提供游戏库管理、系统监控、AI 助手等功能。
+<div align="center">
 
-## 架构
+<p><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/hero-dark.webp">
+  <img src="assets/readme/hero.webp" width="800" alt="Foundation Panel：管好你的被控端。设备与组件、串流设置、日志与诊断。">
+</picture></p>
 
-```mermaid
-flowchart LR
-    subgraph Client["WebView2 Client"]
-        direction TB
-        Vue["Vue 3 + Vite"]
-        Composables["Composables<br/>useApps · useTauri · useTheme"]
-        Vue --> Composables
-    end
+<p align="center"><a href="https://github.com/AlkaidLab/foundation-sunshine"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/b1-dark.webp"><img src="assets/readme/b1.webp" alt="了解 Foundation Sunshine" height="56"></picture></a>&nbsp;&nbsp;<a href="#快速开始"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/b2-dark.webp"><img src="assets/readme/b2.webp" alt="快速开始" height="56"></picture></a>&nbsp;&nbsp;<a href="#功能"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/b3-dark.webp"><img src="assets/readme/b3.webp" alt="功能一览" height="56"></picture></a></p>
 
-    subgraph Core["Tauri 2 · Rust"]
-        direction TB
-        IPC["IPC Bridge<br/>invoke · events"]
-        Axum["Axum Proxy :48081"]
-        Sys["WMI COM · winreg"]
-        AI["AI Proxy · reqwest"]
-        IPC --> Axum & Sys & AI
-    end
+[![Latest release](https://img.shields.io/github/v/release/AlkaidLab/foundation-panel?include_prereleases&sort=date&label=Latest)](https://github.com/AlkaidLab/foundation-panel/releases) [![Downloads](https://img.shields.io/github/downloads/AlkaidLab/foundation-panel/total?label=Downloads)](https://github.com/AlkaidLab/foundation-panel/releases) [![GitHub Stars](https://img.shields.io/github/stars/AlkaidLab/foundation-panel?style=flat&label=Stars)](https://github.com/AlkaidLab/foundation-panel) [![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
 
-    subgraph Services["External Services"]
-        direction TB
-        Sunshine["☀️ Sunshine<br/>HTTPS :47990"]
-        Steam["Steam Store API"]
-        LLM["LLM API · OpenAI"]
-        GitHub["GitHub Releases"]
-        VDD["IddCx VDD Driver"]
-    end
+简体中文
 
-    Composables -- "Tauri invoke()" --> IPC
-    Axum -- "HTTPS · reqwest" --> Sunshine
-    Sys -. "WMI Query" .-> Sunshine
-    Sys -. "Registry" .-> VDD
-    AI -- "HTTP" --> LLM
-    AI -- "HTTP" --> Steam & GitHub
-```
+[官网](https://www.alkaidlab.com/) · [国内官网](https://www.alkaidlab.cn/) · [问题反馈](https://github.com/AlkaidLab/foundation-panel/issues)
 
-## 功能特性
+</div>
 
-### 核心能力
+Foundation Panel 是基于 Tauri 2 和 Vue 3 的 Windows 桌面面板，用来管理 Foundation 被控端，目前配合 [Foundation Sunshine](https://github.com/AlkaidLab/foundation-sunshine) 使用，之后也会承载其他 Foundation 被控端。
 
-- 🔄 **更新管理** — 自动检查更新、下载进度、一键安装，支持 Beta/预发布版本切换
-- ⚡ **运行模式切换** — 服务模式 ↔ 用户模式一键切换
-- 🔌 **服务管理** — Sunshine 启停、重启、运行状态监控、配对设备管理
-- 📊 **内存监控** — 进程内存/工作集实时趋势图、子进程列表、运行时间统计
+概览、设置、设备组件和日志诊断集中在一个窗口，托盘菜单、启动画面和大屏界面随连接一起工作。
 
-### 游戏库
+<div align="center">
 
-- 🎮 **应用管理** — 网格/列表视图、搜索过滤、收藏置顶、最近使用、排序
-- 🖼️ **Steam 封面搜索** — 右键更新封面，Steam Store API 搜索候选，一键上传
-- 🚀 **一键启动** — 右键启动游戏/应用，支持管理员权限、工作目录
-- 🔧 **启动助手** — 为应用配置前置/后置脚本（虚拟显示器、分辨率切换等）
-- 📚 **游戏库扫描** — 自动扫描 Steam/Epic 已安装游戏
+<p align="center"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/show-dark.webp">
+  <img src="assets/readme/show.webp" alt="Foundation Panel 展示图：概览窗口和托盘菜单，周围是语言数、码率上限、缩放、CPU 与已配对设备小组件。" width="880">
+</picture></p>
 
-### 串流与驱动
+</div>
 
-- 🎬 **串流配置** — 编码器选择 (H.264/H.265/AV1)、码率调节、HDR 自动切换
-- 📺 **VDD 驱动管理** — 虚拟显示驱动安装/配置/EDID 管理
-- 🖱️ **虚拟鼠标** — 驱动安装与状态管理
-- 🌙 **Moonlight Web** — 浏览器串流服务管理
+[功能](#功能) · [构建](#构建) · [帮助与参与](#帮助与参与) · [致谢](#致谢)
 
-### 智能与工具
+## 下载
 
-- 🤖 **米塔 AI** — 为 Sunshine 及客户端提供大模型能力，多模型配置、桌面宠物
-- 🛠️ **工具箱** — 码率调节器、DPI 缩放、键盘快捷键指南、系统诊断
-- 📋 **日志管理** — 实时日志查看、导出、过滤
+面板随 [Foundation Sunshine](https://github.com/AlkaidLab/foundation-sunshine/releases/latest) 安装包一起提供，安装 Foundation Sunshine 即可使用。本仓库的[发行版](https://github.com/AlkaidLab/foundation-panel/releases)供 Foundation Sunshine 打包使用。
 
-### 桌面体验
+需要 Windows 10 22H2 或更新版本。
 
-- 🎨 **主题切换** — 亮色/暗色/自定义背景
-- 🌍 **中英双语** — 即时切换
-- 🪟 **多窗口** — 主窗口 + 浮动工具栏 + 日志控制台
-- ☀️ **防休眠** — 串流期间保持屏幕/系统唤醒
-- 🔑 **全局快捷键** — Ctrl+Shift+Alt+T 切换工具栏
+## 快速开始
 
-## 前置要求
+1. 安装被控端（例如 Foundation Sunshine）。
+2. 打开面板，第一次启动会进入引导：检查网络、UPnP、公网地址和可达性，然后配对第一台控制端设备。
+3. 在概览中查看设备、会话和更新；在设置中调整串流、显示器和输入。
 
-- Node.js 和 npm
-- Rust 和 Cargo (用于 Tauri)
-- Windows SDK (Windows)
+## 功能
 
-## 开发
-
-```bash
-# 安装依赖
-npm install
-
-# 启动开发服务器（代理到 Sunshine 服务）
-npm run dev
-
-# 仅启动前端开发服务器
-npm run dev:renderer
-```
-
-### WebUI 联调开发模式
-
-当需要同时开发 WebUI 和 Tauri GUI 时，可以使用 `dev-webui` 模式让 Tauri 代理服务器转发请求到 WebUI 开发服务器：
-
-```bash
-# 终端 1：在项目根目录启动 WebUI 开发服务器（端口 3000）
-cd ../../../..  # 回到 Sunshine 根目录
-npm run dev-server
-
-# 终端 2：在 sunshine-control-panel 目录启动 Tauri（代理到 WebUI 开发服务器）
-npm run dev-webui
-```
-
-这种模式下：
-- WebUI 开发服务器运行在 `https://localhost:3000`
-- Tauri 代理服务器会将请求转发到 WebUI 开发服务器
-- 支持 HMR（热模块替换），修改 WebUI 代码会实时生效
-- API 请求仍会被 WebUI 开发服务器代理到 Sunshine 服务（`https://localhost:47990`）
+- **概览：** 设备、虚拟显示器、USB、麦克风和手柄状态，CPU、GPU 与内存负载，公告和配对卡片，配对二维码。
+- **设置：** 串流设置、面板选项、外观、关于与网络概览；界面语言跟随系统，支持 18 种语言。
+- **设备与组件：** 虚拟显示器、虚拟麦克风与 VB-Cable、虚拟鼠标、ViGEmBus、USB 转发、DualSense 原生状态与调校、DLSS NR 与 RTX HDR 组件的导入与管理。
+- **诊断：** 日志与诊断合为一页，包含体检、错误记录、诊断包导出，以及面板自己的日志；崩溃报告在你同意后才会上传。
+- **更新：** 更新窗口显示真实下载进度，支持 Mirror酱 渠道，Beta 与预发布版本可选。
+- **托盘与启动画面：** 三种托盘菜单、快速面板、游戏启动时的启动画面。
+- **大屏界面：** 手柄与键盘可操作的桌面界面，管理应用、封面和启动助手。
+- **工具：** 码率调节、DPI 缩放、RTSS 叠加、延迟时钟、串流计时器和浮动工具栏。
+- **助手：** 可选的 AI 助手，粘贴的日志会先脱敏。
 
 ## 构建
 
 ```bash
-# 构建渲染进程
-npm run build:renderer
+# 面板依赖同级目录 ../ds5-ui-m3e 中的 foundation-ui（Material 3 Expressive 组件），先把它放在那里（只需一次）：
+git clone https://github.com/AlkaidLab/foundation-ui ../ds5-ui-m3e
+npm install
 
-# 构建完整应用
-npm run build
-
-# Windows 构建
-npm run build:win
+npm run dev:renderer     # 仅启动前端开发服务器
+npm run test:renderer    # 前端测试
+npm run build            # 构建安装包（Windows）
+cargo test --manifest-path src-tauri/Cargo.toml --bin sunshine-gui
 ```
 
-## 项目结构
+## 帮助与参与
 
-```
-src-tauri/           # Tauri 后端 (Rust)
-  ├── src/
-  │   ├── main.rs            # 主入口、命令注册
-  │   ├── proxy_server.rs    # Axum 本地代理 (Sunshine/Steam API/CORS)
-  │   ├── sunshine.rs        # Sunshine 进程管理、路径工具
-  │   ├── system.rs          # 系统信息 (WMI 进程查询、内存统计)
-  │   ├── fs_utils.rs        # 文件系统、游戏扫描、Steam 封面搜索/上传
-  │   ├── commands.rs        # HTTP 客户端、应用启动
-  │   ├── vdd.rs             # VDD 驱动管理
-  │   └── windows.rs         # Windows 注册表/autostart
-  ├── inject-script.js       # 注入到 Sunshine Web UI 的脚本
-  └── Cargo.toml
+- [提交问题](https://github.com/AlkaidLab/foundation-panel/issues)
+- [官网](https://www.alkaidlab.com/) · [国内官网](https://www.alkaidlab.cn/)
+- 设计与页面状态记录在 [docs/redesign](docs/redesign)，托盘菜单与右键菜单窗口见 [docs](docs)。
 
-src/renderer/        # 前端 (Vue 3)
-  ├── desktop/              # Desktop UI (独立 SPA)
-  │   ├── views/            # 页面视图 (Dashboard、Apps、Settings...)
-  │   ├── components/       # 组件 (AppGrid、ContextMenu、CoverPicker...)
-  │   ├── composables/      # 组合式函数 (useApps、useTauri...)
-  │   └── i18n/             # 国际化 (zh、en)
-  ├── components/           # 共享组件
-  └── styles/               # Less 样式
+## 致谢
 
-vite.config.js       # Vite 构建配置
-package.json         # NPM 依赖
-```
+本项目基于 [qiin2333/sunshine-control-panel](https://github.com/qiin2333/sunshine-control-panel)（MIT）继续开发，保留其提交历史和许可证。详见 [NOTICE.md](NOTICE.md)。
 
-## 技术栈
-
-- **前端**: Vue 3 + Less + 自定义组件
-- **后端**: Rust + Tauri 2
-- **HTTP**: Axum (代理)、reqwest (HTTP 客户端)
-- **系统**: WMI (进程查询)、Win32 API (内存统计)、Windows Registry
-- **构建**: Vite
-
-## 集成到 Sunshine
-
-编译后的 GUI 会自动安装到 Sunshine 的 `assets/gui` 目录：
-
-```
-Sunshine/
-  └── assets/
-      └── gui/
-          └── sunshine-gui.exe
-```
-
-## 注意事项
-
-- Tauri GUI 是可选组件，不影响 Sunshine 核心功能
-- 需要 Rust 工具链才能构建 Tauri 应用
-- 首次构建会下载并编译 Rust 依赖，需要较长时间
+感谢 [LizardByte/Sunshine](https://github.com/LizardByte/Sunshine)、[Moonlight](https://moonlight-stream.org/)，以及所有参与开发、测试和翻译的贡献者。项目遵循 [MIT 许可证](LICENSE)。
