@@ -138,6 +138,7 @@ import { SPONSORS } from '../config/sponsors.js'
 import QRCode from 'qrcode'
 import { invoke } from '@tauri-apps/api/core'
 import { qrSvgDataUrl } from '../composables/qrSvg.js'
+import { audioDevicesChannel } from '../composables/deviceStatusStore.js'
 import { openBigScreenWithNotice } from '../composables/openBigScreen.js'
 import { installMenuPopup } from '../composables/menuPopup.js'
 import { installTrayTheme } from '../composables/trayTheme.js'
@@ -472,7 +473,9 @@ const hostConfig = ref(null)
 const dualsenseKeys = ref([])
 const hostClients = ref([])
 const hostApps = ref([])
-const settingsList = useSettingsList({ locale, config: hostConfig, dualsenseKeys, sources: { clients: hostClients, apps: hostApps, components: computed(() => componentStatus.rows.value), rtss: computed(() => ({ installed: rtssInstalled.value === true })), ds: computed(() => runtime.ds), mic: computed(() => runtime.mic), usb: computed(() => runtime.usb) } })
+const settingsList = useSettingsList({ locale, config: hostConfig, dualsenseKeys, sources: { clients: hostClients, apps: hostApps, components: computed(() => componentStatus.rows.value), rtss: computed(() => ({ installed: rtssInstalled.value === true })), ds: computed(() => runtime.ds), mic: computed(() => runtime.mic), usb: computed(() => runtime.usb), audio: computed(() => audioDevicesChannel.data.value?.render || null) } })
+// the playback devices of the host: the audio row names the chosen device, the setting holds an id
+onMounted(() => { audioDevicesChannel.fetch().catch(() => null) })
 // the settings used last belong to the host this window manages: the proxy target is this machine's host while it is a loopback address, and the origin of the host it points at
 // otherwise (the panel accepts a --url that turns the whole window to another host); the first scoping keeps the list this window already has
 onMounted(async () => {

@@ -4,6 +4,7 @@ import { firstImage, micIsReady, padIsReady, MPage, MIcon, MIconButton, MDialog,
 import { buildCatalogue, buildCatalogueDetails, useJourneyHome, useReleaseAssets, useStarCard, useSessionClock, useSystemInfo, reachProblemOf, registeredComponentStatus, createHistory, createHttpVddAdapter, createPairQr, createVddStore, saveSettingKey, vddStatusOf, recentKeys, rememberRecent, isLoopbackHost, createQueuedCalls, createSerialCalls } from 'foundation-ui/vue'
 import QRCode from 'qrcode'
 import { qrSvgDataUrl } from '../composables/qrSvg.js'
+import { audioDevicesChannel } from '../composables/deviceStatusStore.js'
 import { usePanelHome, seen, SETTLE_CAP_MS } from '../composables/usePanelHome.js'
 import { useHostReach } from '../composables/useHostReach.js'
 import { useGamepadType } from '../composables/useGamepadType.js'
@@ -145,7 +146,7 @@ const catalogueInput = computed(() => {
     history: { samples: history.samples, sessions: history.sessions, days: history.days, last: () => history.last() },
     sys: model.value.info.some((i) => i.id === 'memory') && state.memory ? { memTotal: state.memory.system_total_memory, memAvail: state.memory.system_available_memory } : null,
     recent: recentKeys.value, canRuntime: canRuntime.value, ds5Keys: ds5Keys.value,
-    config: state.config, logText: state.logText, logs: state.errorLog, clients: state.clients ? state.clients.map((c) => ({ ...c, icon: 'devices' })) : null,
+    config: state.config, audio: audioDevicesChannel.data.value?.render || null, logText: state.logText, logs: state.errorLog, clients: state.clients ? state.clients.map((c) => ({ ...c, icon: 'devices' })) : null,
     apps: state.apps ? state.apps.map((a) => ({ id: a.name, name: a.name, cover: coverOf(a) })) : null,
     codecModes: state.config && state.config.hevc_mode !== undefined ? { hevc: state.config.hevc_mode, av1: state.config.av1_mode } : null,
     pads: { text: [modeLabel.value, dsLabel.value].filter(Boolean).join(' · ') || '–' }, usb: props.runtime.usb?.attached_devices ? props.runtime.usb.attached_devices.length : null,
