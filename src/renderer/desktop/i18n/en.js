@@ -1277,7 +1277,7 @@ Output only one short sentence, no explanation. Reply in English.`,
         "streaming": "An application is recording and client audio is arriving.",
         "stopping": "Streaming ended; the virtual microphone is being removed."
       },
-      "backend": "Microphone mode",
+      "backend": "Client microphone destination",
       "vbCable": "VB-CABLE",
       "vbCableStates": {
         "ready": "Ready",

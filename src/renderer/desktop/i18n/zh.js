@@ -1277,7 +1277,7 @@ export const zh = {
         "streaming": "有应用正在录音，客户端声音正在传入。",
         "stopping": "串流已结束，正在移除虚拟麦克风。"
       },
-      "backend": "麦克风方式",
+      "backend": "客户端麦克风去向",
       "vbCable": "VB-CABLE",
       "vbCableStates": {
         "ready": "已就绪",
