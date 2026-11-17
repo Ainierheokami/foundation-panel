@@ -194,12 +194,35 @@ jobs:
             Write-Host "$($_.Name): $([math]::Round($_.Length / 1MB, 2)) MB"
           }
 
+          # Executable size, raw and compressed, in bytes (to follow the package size from build to build)
+          $exe = Get-Item "$outDir/sunshine-gui.exe"
+          $packed = Join-Path $env:RUNNER_TEMP 'sunshine-gui.exe.zip'
+          Compress-Archive -Path $exe.FullName -DestinationPath $packed -CompressionLevel Optimal -Force
+          $line = "sunshine-gui.exe: $($exe.Length) bytes, $((Get-Item $packed).Length) bytes zipped"
+          Write-Host $line
+          "- $line" >> $env:GITHUB_STEP_SUMMARY
+
+          # The symbols for decoding crash reports stay outside the release package
+          $pdb = Get-ChildItem $targetDir -Filter '*.pdb' | Where-Object { $_.Name -like 'sunshine*gui*.pdb' } | Select-Object -First 1
+          if (-not $pdb) { throw "The release build wrote no PDB: crash reports could not be decoded" }
+          New-Item -ItemType Directory -Force -Path symbols | Out-Null
+          Copy-Item $pdb.FullName "symbols/"
+
       - name: Upload artifacts
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: sunshine-gui-windows-x64
           path: artifacts/*
+          if-no-files-found: error
+
+      - name: Upload symbols
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sunshine-gui-symbols
+          path: symbols/*
+          retention-days: 90
           if-no-files-found: error
 
   release:

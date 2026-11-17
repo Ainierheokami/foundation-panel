@@ -40,7 +40,10 @@ export default defineConfig(() => ({
     emptyOutDir: true,
     target: ['es2021', 'chrome100', 'safari15'],
     minify: !process.env.TAURI_DEBUG ? 'esbuild' : false,
-    sourcemap: !!process.env.TAURI_DEBUG,
+    // Release bundles must never carry source maps; debug builds remain
+    // inspectable through the explicit dev server instead. Source:
+    // panel-vite-build-options.
+    sourcemap: false,
     rollupOptions: {
       input: {
         sunshineFrame: resolve(rendererSrcPath, 'sunshine-frame.html'),
