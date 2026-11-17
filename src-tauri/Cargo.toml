@@ -7,6 +7,15 @@ license = "MIT"
 repository = "https://github.com/qiin2333/sunshine"
 edition = "2024"
 
+# The release profile follows the Cargo profile reference: size optimisation,
+# whole-program LTO, one codegen unit, and symbol stripping. Keep panic
+# handling at Cargo's default for this application. Sources: panel-cargo-profiles
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = true
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [build-dependencies]
