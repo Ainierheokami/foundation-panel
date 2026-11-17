@@ -8,13 +8,16 @@ repository = "https://github.com/qiin2333/sunshine"
 edition = "2024"
 
 # The release profile follows the Cargo profile reference: size optimisation,
-# whole-program LTO, one codegen unit, and symbol stripping. Keep panic
-# handling at Cargo's default for this application. Sources: panel-cargo-profiles
+# whole-program LTO and one codegen unit. Keep panic handling at Cargo's
+# default for this application. No `strip`: on the MSVC target it makes rustc
+# pass /DEBUG:NONE to the linker, so no PDB is written and the crash reports
+# (module + offset frames) could not be decoded. The PDB is a separate file
+# and does not add to the size of the executable; CI archives it.
+# Sources: panel-cargo-profiles
 [profile.release]
 opt-level = "s"
 lto = "fat"
 codegen-units = 1
-strip = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
