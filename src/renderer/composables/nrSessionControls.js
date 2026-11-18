@@ -21,6 +21,19 @@ const OPTIONS = {
  */
 export const focusLeaves = (section, next) => !(next && typeof section?.contains === 'function' && section.contains(next))
 
+export const SLIDER_KEYS = Object.freeze(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'])
+
+/**
+ * Whether a press or a key begins editing a slider of the live controls: a press on a slider, or a key that changes the value on the handle of one. Tab, a press on a switch or a segmented
+ * control and the keys of other controls begin nothing: an edit that never commits would hold the draft against the values the host reports.
+ */
+export function startsSliderEdit(event) {
+  const target = event?.target
+  if (typeof target?.closest !== 'function') return false
+  if (event.type === 'keydown') return SLIDER_KEYS.includes(event.key) && !!target.closest('[role=slider]')
+  return !!target.closest('.m-slider')
+}
+
 // Validate the target again when committing an edit: a newly selected stream
 // must never receive a value drafted for the previous one.
 export function nrSessionRequest(pipeline, targetId, patch, online = true, { reset = false } = {}) {

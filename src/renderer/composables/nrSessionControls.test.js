@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { nrSessionRequest, nrResetRequest, focusLeaves } from './nrSessionControls.js'
+import { nrSessionRequest, nrResetRequest, focusLeaves, startsSliderEdit } from './nrSessionControls.js'
 const active = {
   id: 42,
   nr_toggle_supported: true,
@@ -101,4 +101,21 @@ test('the focus going from one control of the live controls to another does not 
   const view = readFileSync(new URL('../components/NrSessionControls.vue', import.meta.url), 'utf8')
   assert.match(view, /@focusout="\(event\) => \{ if \(focusLeaves\(event\.currentTarget, event\.relatedTarget\)\) cancelEdit\(\) \}"/)
   assert.ok(!/@focusout="cancelEdit"/.test(view), 'a focus change inside the section must not cancel the edit')
+})
+
+test('only a press on a slider or a value key on its handle begins an edit: Tab and the other controls do not', () => {
+  const inside = (selectors) => ({ closest: (selector) => (selectors.includes(selector) ? {} : null) })
+  const slider = inside(['.m-slider', '[role=slider]'])
+  const seg = inside([])
+  assert.equal(startsSliderEdit({ type: 'pointerdown', target: slider }), true)
+  assert.equal(startsSliderEdit({ type: 'pointerdown', target: seg }), false, 'a press on a switch or a segmented control')
+  assert.equal(startsSliderEdit({ type: 'keydown', key: 'ArrowRight', target: slider }), true)
+  assert.equal(startsSliderEdit({ type: 'keydown', key: 'Home', target: slider }), true)
+  assert.equal(startsSliderEdit({ type: 'keydown', key: 'Tab', target: slider }), false, 'Tab moves the focus, it edits nothing')
+  assert.equal(startsSliderEdit({ type: 'keydown', key: 'ArrowRight', target: seg }), false, 'the arrows of a segmented control')
+  assert.equal(startsSliderEdit({ type: 'keydown', key: 'ArrowRight', target: {} }), false)
+  assert.equal(startsSliderEdit(null), false)
+  const view = readFileSync(new URL('../components/NrSessionControls.vue', import.meta.url), 'utf8')
+  assert.match(view, /@pointerdown\.capture="pressEdit" @keydown\.capture="pressEdit"/)
+  assert.ok(!/@keydown\.capture="beginEdit"/.test(view))
 })
