@@ -2119,7 +2119,6 @@ onUnmounted(() => {
 
 @halo-default: drop-shadow(0 0 2px rgba(255, 182, 193, 0.1)) drop-shadow(0 0 4px rgba(221, 160, 221, 0.05));
 @halo-hover: drop-shadow(0 0 3px rgba(255, 182, 193, 0.16)) drop-shadow(0 0 5px rgba(221, 160, 221, 0.07));
-@halo-active: drop-shadow(0 0 3px rgba(123, 80, 87, 0.2)) drop-shadow(0 0 6px rgba(221, 160, 221, 0.08));
 
 @transition-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
 
@@ -2298,7 +2297,6 @@ onUnmounted(() => {
     filter: @halo-hover;
   }
 
-  &.active { filter: @halo-active; }
 }
 
 .icon-image,
