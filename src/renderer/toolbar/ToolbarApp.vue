@@ -2440,6 +2440,6 @@ onUnmounted(() => {
 .bubble-wrapper:nth-child(n) .bubble-item.danger { background: var(--pet-error-container); }
 .bubble-caption { color: var(--pet-on-surface); text-shadow: 0 1px 2px color-mix(in srgb, var(--md-sys-color-shadow, #000) 30%, transparent); }
 .bubble-caption.danger { color: var(--pet-on-error-container); }
-.speech-bubble { color: var(--pet-on-surface); background: var(--pet-surface); border: 1px solid var(--md-sys-color-outline-variant, rgba(255,255,255,.18)); box-shadow: 0 8px 28px color-mix(in srgb, var(--md-sys-color-shadow, #000) 30%, transparent); }
+.speech-bubble { color: var(--pet-on-surface); background: var(--pet-surface); border: 1px solid var(--md-sys-color-outline-variant, rgba(255,255,255,.18)); }
 .speech-bubble::after { border-top-color: var(--pet-surface); }
 </style>
