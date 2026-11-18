@@ -15,6 +15,12 @@ const OPTIONS = {
   autoMask: [3, (v) => typeof v === 'boolean'],
 }
 
+/**
+ * Whether a change of focus takes the focus out of the live controls (to nothing, or to an element outside them). The focus moving from one control of the section to another
+ * (a press on the track of the next slider moves it from the handle of the one before) is not leaving: it must not drop the edit that press began.
+ */
+export const focusLeaves = (section, next) => !(next && typeof section?.contains === 'function' && section.contains(next))
+
 // Validate the target again when committing an edit: a newly selected stream
 // must never receive a value drafted for the previous one.
 export function nrSessionRequest(pipeline, targetId, patch, online = true, { reset = false } = {}) {

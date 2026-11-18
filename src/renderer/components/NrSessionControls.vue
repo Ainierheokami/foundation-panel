@@ -1,5 +1,5 @@
 <template>
-  <section class="live-controls" :aria-busy="busy || pending" @pointerdown.capture="beginEdit" @keydown.capture="beginEdit" @focusout="cancelEdit">
+  <section class="live-controls" :aria-busy="busy || pending" @pointerdown.capture="beginEdit" @keydown.capture="beginEdit" @focusout="(event) => { if (focusLeaves(event.currentTarget, event.relatedTarget)) cancelEdit() }">
     <div class="live-control-row">
       <MSwitchItem
         :model-value="!!pipeline.nr_requested_enabled"
@@ -56,7 +56,7 @@ import { useI18n } from '../desktop/i18n/index.js'
 import { enhancementControlsText } from '../composables/enhancementControls.js'
 import { nrOverlayText } from '../composables/nrOverlayMessages.js'
 import { nrOverlayState } from '../composables/nrOverlayState.js'
-import { nrSessionRequest, nrResetRequest } from '../composables/nrSessionControls.js'
+import { nrSessionRequest, nrResetRequest, focusLeaves } from '../composables/nrSessionControls.js'
 const props = defineProps({
   pipeline: { type: Object, required: true },
   online: Boolean
