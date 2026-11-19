@@ -64,6 +64,8 @@ mod system_load_core;
 mod text_encoding;
 #[cfg(target_os = "windows")]
 mod text_context;
+#[cfg(target_os = "windows")]
+mod touch_keyboard;
 mod toolbar;
 mod tray;
 mod tray_config;
