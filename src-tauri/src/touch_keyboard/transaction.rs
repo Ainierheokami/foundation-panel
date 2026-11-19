@@ -45,6 +45,7 @@ struct Entry {
 struct Snapshot {
     version: u32,
     session_id: u32,
+    logon_time: i64,
     enabled: bool,
     values: Vec<Entry>,
     notification_original: Option<u32>,
@@ -93,6 +94,8 @@ pub(super) trait Registry {
 /// The runtime preference is session-scoped and may differ from the registry.
 /// Implementations must reject a different session and unsupported payloads.
 pub(super) trait Notification {
+    fn logon_time(&mut self, session_id: u32) -> io::Result<Option<i64>>;
+    fn current_session(&mut self) -> io::Result<u32>;
     fn read(&mut self, session_id: u32) -> io::Result<u32>;
     fn publish(&mut self, session_id: u32, value: u32) -> io::Result<()>;
 }
@@ -120,6 +123,7 @@ fn parse_journal(bytes: &[u8]) -> io::Result<ParsedJournal> {
     let snapshot: Snapshot = serde_json::from_slice(&bytes[..header_end])
         .map_err(|_| invalid("touch keyboard journal snapshot is invalid"))?;
     let valid_version = snapshot.version == 1
+        && snapshot.logon_time > 0
         && snapshot
             .notification_original
             .is_some_and(|value| value <= 2);
@@ -286,6 +290,10 @@ impl<R: Registry, J: Journal, N: Notification> Transaction<R, J, N> {
         // Probe before any write. An unavailable internal API must not leave
         // registry-only changes that Windows never applies.
         let notification_original = self.notification.read(session_id)?;
+        let logon_time = self
+            .notification
+            .logon_time(session_id)?
+            .ok_or_else(|| io::Error::other("touch keyboard Windows session ended"))?;
         if notification_original > 2 {
             return Err(invalid("unsupported touch keyboard notification value"));
         }
@@ -308,6 +316,7 @@ impl<R: Registry, J: Journal, N: Notification> Transaction<R, J, N> {
         let snapshot = Snapshot {
             version: 1,
             session_id,
+            logon_time,
             enabled,
             values,
             notification_original: Some(notification_original),
@@ -374,6 +383,22 @@ impl<R: Registry, J: Journal, N: Notification> Transaction<R, J, N> {
             return Ok(());
         };
         let parsed = parse_journal(&bytes)?;
+        // Check before touching the shared user registry: a different live
+        // session may still own the runtime preference after its GUI crashed.
+        let mut restore_notification = true;
+        if parsed.intents.contains(&NOTIFICATION_INDEX) {
+            let session_id = parsed.snapshot.session_id;
+            let current_session = self.notification.current_session()?;
+            let actual_logon = self.notification.logon_time(session_id)?;
+            let same_logon = actual_logon == Some(parsed.snapshot.logon_time);
+            if !same_logon {
+                restore_notification = false;
+            } else if current_session != session_id {
+                return Err(io::Error::other(
+                    "touch keyboard recovery belongs to another active Windows session",
+                ));
+            }
+        }
         let mut first_error = None;
         for &index in parsed.intents.iter().rev() {
             if index == NOTIFICATION_INDEX {
@@ -420,7 +445,7 @@ impl<R: Registry, J: Journal, N: Notification> Transaction<R, J, N> {
         if let Some(error) = first_error {
             return Err(error);
         }
-        if parsed.intents.contains(&NOTIFICATION_INDEX) {
+        if restore_notification && parsed.intents.contains(&NOTIFICATION_INDEX) {
             let original = parsed
                 .snapshot
                 .notification_original

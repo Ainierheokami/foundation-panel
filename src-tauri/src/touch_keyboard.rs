@@ -105,24 +105,12 @@ pub(crate) fn start() -> Guard {
     match std::thread::Builder::new()
         .name("touch-keyboard".into())
         .spawn(move || {
-            let mut mode = None;
-            let mut init_backoff = RETRY_INITIAL;
-            let journal = loop {
-                match FileJournal::new() {
-                    Ok(journal) => break journal,
-                    Err(error) => {
-                        log::warn!("touch keyboard journal directory is unavailable: {error}");
-                    }
-                }
-                match receiver.recv_timeout(init_backoff) {
-                    Ok(Command::Update(next)) => mode = next,
-                    Ok(Command::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
-                }
-                if worker_stopping.load(Ordering::Acquire) {
+            let journal = match FileJournal::new() {
+                Ok(journal) => journal,
+                Err(error) => {
+                    log::warn!("touch keyboard user data path is unavailable: {error}");
                     return;
                 }
-                init_backoff = (init_backoff * 2).min(RETRY_MAX);
             };
             let mut transaction =
                 Transaction::new(UserRegistry::default(), journal, WnfNotification::default());
@@ -133,10 +121,7 @@ pub(crate) fn start() -> Guard {
                     Some(RETRY_INITIAL)
                 }
             };
-            // Apply updates that arrived while resolving the journal path.
-            if mode.is_some() {
-                retry = Some(Duration::ZERO);
-            }
+            let mut mode = None;
             let mut backoff = RETRY_INITIAL;
             loop {
                 let command = if let Some(delay) = retry.take() {
@@ -533,6 +518,12 @@ mod tests {
     struct IsolatedNotification(u32);
 
     impl transaction::Notification for IsolatedNotification {
+        fn current_session(&mut self) -> io::Result<u32> {
+            Ok(42)
+        }
+        fn logon_time(&mut self, _: u32) -> io::Result<Option<i64>> {
+            Ok(Some(100))
+        }
         fn read(&mut self, _: u32) -> io::Result<u32> {
             Ok(self.0)
         }

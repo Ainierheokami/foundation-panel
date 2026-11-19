@@ -20,6 +20,9 @@ struct Fixture {
     writes: usize,
     flushes: usize,
     notification_value: u32,
+    session_id: u32,
+    logon_time: Option<i64>,
+    session_query_failure: bool,
     notification_read_failure: bool,
     notification_fail_value: Option<u32>,
     notification_fail_after_publish: bool,
@@ -176,8 +179,22 @@ impl Journal for FakeJournal {
 struct FakeNotification(Shared);
 
 impl Notification for FakeNotification {
-    fn read(&mut self, _: u32) -> io::Result<u32> {
+    fn current_session(&mut self) -> io::Result<u32> {
+        Ok(self.0.borrow().session_id)
+    }
+
+    fn logon_time(&mut self, _: u32) -> io::Result<Option<i64>> {
         let fixture = self.0.borrow();
+        if fixture.session_query_failure {
+            Err(permission())
+        } else {
+            Ok(fixture.logon_time)
+        }
+    }
+
+    fn read(&mut self, session_id: u32) -> io::Result<u32> {
+        let mut fixture = self.0.borrow_mut();
+        fixture.session_id = session_id;
         if fixture.notification_read_failure {
             return Err(permission());
         }
@@ -226,6 +243,7 @@ fn transaction(fixture: &Shared) -> Transaction<FakeRegistry, FakeJournal, FakeN
 fn fixture() -> Shared {
     let mut data = Fixture::default();
     data.notification_value = 2;
+    data.logon_time = Some(100);
     data.values.insert(KEYS[0].name.into(), dword(1));
     Rc::new(RefCell::new(data))
 }
@@ -511,6 +529,53 @@ fn crash_after_publication_recovers_original_live_value() {
     assert_eq!(shared.borrow().notification_value, 2);
     assert_eq!(shared.borrow().values, original);
     assert!(shared.borrow().journal.is_none());
+}
+
+#[test]
+fn crash_recovery_respects_windows_logon_lifetime() {
+    for (current_session, logon_time, still_live) in [
+        (12, Some(100), true),
+        (12, None, false),
+        (11, Some(200), false),
+    ] {
+        let shared = fixture();
+        let original = shared.borrow().values.clone();
+        {
+            let mut tx = transaction(&shared);
+            tx.reconcile(Some(false), 11).unwrap();
+        }
+        {
+            let mut data = shared.borrow_mut();
+            data.session_id = current_session;
+            data.logon_time = logon_time;
+            data.notification_value = 1;
+        }
+        let result = transaction(&shared).recover_on_start();
+        let data = shared.borrow();
+        assert_eq!(result.is_err(), still_live);
+        assert_eq!(data.journal.is_some(), still_live);
+        assert_eq!(data.notification_value, 1);
+        if still_live {
+            assert_eq!(data.values.get(KEYS[0].name), Some(&dword(0)));
+        } else {
+            assert_eq!(data.values, original);
+        }
+    }
+}
+
+#[test]
+fn session_query_failure_preserves_pending_recovery() {
+    let shared = fixture();
+    {
+        let mut tx = transaction(&shared);
+        tx.reconcile(Some(false), 11).unwrap();
+    }
+    shared.borrow_mut().session_query_failure = true;
+    assert!(transaction(&shared).recover_on_start().is_err());
+    let data = shared.borrow();
+    assert!(data.journal.is_some());
+    assert_eq!(data.values.get(KEYS[0].name), Some(&dword(0)));
+    assert_eq!(data.notification_value, 0);
 }
 
 #[test]

@@ -8,6 +8,10 @@
 use std::ffi::c_void;
 use std::io;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+use windows::Win32::System::RemoteDesktop::{
+    WTS_SESSION_INFOW, WTSEnumerateSessionsW, WTSFreeMemory, WTSINFOW, WTSQuerySessionInformationW,
+    WTSSessionInfo,
+};
 use windows::core::{s, w};
 
 use super::current_session_id;
@@ -92,6 +96,51 @@ fn nt_result(status: i32, operation: &str) -> io::Result<()> {
 }
 
 impl Notification for WnfNotification {
+    fn current_session(&mut self) -> io::Result<u32> {
+        current_session_id()
+    }
+
+    fn logon_time(&mut self, session_id: u32) -> io::Result<Option<i64>> {
+        // Enumeration distinguishes an ended session from query/access errors.
+        let mut sessions: *mut WTS_SESSION_INFOW = std::ptr::null_mut();
+        let mut count = 0;
+        unsafe { WTSEnumerateSessionsW(None, 0, 1, &mut sessions, &mut count) }
+            .map_err(|e| io::Error::other(format!("enumerating Windows sessions failed: {e}")))?;
+        let exists = if count == 0 {
+            false
+        } else if sessions.is_null() {
+            return Err(io::Error::other("Windows session list is invalid"));
+        } else {
+            unsafe { std::slice::from_raw_parts(sessions, count as usize) }
+                .iter()
+                .any(|session| session.SessionId == session_id)
+        };
+        unsafe { WTSFreeMemory(sessions.cast()) };
+        if !exists {
+            return Ok(None);
+        }
+        let mut buffer = windows::core::PWSTR::null();
+        let mut size = 0;
+        unsafe {
+            WTSQuerySessionInformationW(None, session_id, WTSSessionInfo, &mut buffer, &mut size)
+        }
+        .map_err(|e| io::Error::other(format!("querying Windows session failed: {e}")))?;
+        let result = if buffer.is_null() || (size as usize) < std::mem::size_of::<WTSINFOW>() {
+            Err(io::Error::other("Windows session information is invalid"))
+        } else {
+            let info = unsafe { std::ptr::read_unaligned(buffer.0.cast::<WTSINFOW>()) };
+            if info.SessionId != session_id || info.LogonTime <= 0 {
+                Err(io::Error::other(
+                    "Windows session logon time is unavailable",
+                ))
+            } else {
+                Ok(Some(info.LogonTime))
+            }
+        };
+        unsafe { WTSFreeMemory(buffer.0.cast()) };
+        result
+    }
+
     fn read(&mut self, session_id: u32) -> io::Result<u32> {
         let api = self.api(session_id)?;
         let mut size = 4;
@@ -153,5 +202,17 @@ mod tests {
         assert!(notification.read(other_session).is_err());
         assert!(notification.publish(other_session, 0).is_err());
         assert!(notification.api.is_none());
+    }
+
+    #[test]
+    fn reads_current_windows_logon_time() {
+        let session = current_session_id().unwrap();
+        assert!(
+            WnfNotification::default()
+                .logon_time(session)
+                .unwrap()
+                .unwrap()
+                > 0
+        );
     }
 }
