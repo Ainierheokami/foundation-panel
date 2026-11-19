@@ -137,7 +137,7 @@
 <script setup>
 import { computed, defineAsyncComponent, getCurrentInstance, provide, ref, toRef, watch, onMounted, onBeforeUnmount } from 'vue'
 import { sunshine, sunshineService, tools, openExternalUrl } from '../tauri-adapter.js'
-import { SPONSORS } from '../config/sponsors.js'
+import { SPONSORS, sponsorUrl } from '../config/sponsors.js'
 import QRCode from 'qrcode'
 import { invoke } from '@tauri-apps/api/core'
 import { qrSvgDataUrl } from '../composables/qrSvg.js'
@@ -295,7 +295,7 @@ useSystemNotices({
   update: () => ({ state: updateInfo.value && !updateInfo.value.is_latest ? 'available' : '', next: updateInfo.value?.version || '' }),
 })
 const sponsorSections = computed(() => [
-  { title: t.value.m3e.home.sponsorTitle, items: SPONSORS.map((x) => ({ id: x.id, icon: 'favorite', title: x.label, url: x.url })) },
+  { title: t.value.m3e.home.sponsorTitle, items: SPONSORS.map((x) => ({ id: x.id, icon: 'favorite', title: x.label, url: sponsorUrl(x, locale.value) })) },
   { items: [{ id: 'star', icon: 'star', title: t.value.m3e.home.star, url: 'https://github.com/AlkaidLab/foundation-sunshine' }, { id: 'qq', icon: 'groups', title: t.value.m3e.home.qq, url: 'https://qm.qq.com/q/AfMQoyKrkc' }] },
 ])
 const actions_openExternal = (url) => openExternalUrl(url)

@@ -9,10 +9,18 @@ const BILIBILI_URL: &str = "https://space.bilibili.com/3690974838524514";
 const STAR_URL: &str = "https://github.com/AlkaidLab/foundation-sunshine";
 
 fn site_url(locale: &str) -> &'static str {
-    if locale == "zh" {
+    if locale.to_ascii_lowercase().starts_with("zh") {
         "https://www.alkaidlab.cn/"
     } else {
         "https://www.alkaidlab.com/"
+    }
+}
+
+fn sponsor_site_url(locale: &str) -> &'static str {
+    if locale.to_ascii_lowercase().starts_with("zh") {
+        "https://www.alkaidlab.cn/#sponsors"
+    } else {
+        "https://www.alkaidlab.com/en/#sponsors"
     }
 }
 
@@ -110,6 +118,8 @@ pub fn handle_tray_menu_event<R: Runtime + 'static>(app: &AppHandle<R>, menu_id:
         "sponsor_qiin" => utils::open_url_in_browser("https://www.ifdian.net/a/qiin2333"),
         "sponsor_yundi339" => utils::open_url_in_browser("https://www.ifdian.net/a/Yundi339"),
         "sponsor_skyhua" => utils::open_url_in_browser("https://ifdian.net/a/skyhua"),
+        "sponsor_wechat" => utils::open_url_in_browser(sponsor_site_url(&get_current_locale())),
+        "sponsor_github" => utils::open_url_in_browser("https://github.com/sponsors/qiin2333"),
         "restart" => restart_sunshine(app),
         // the native menu's stepped stand-ins for the menus' bitrate and scale sliders (menu.rs)
         _ if popup_input::native_slider_event(app, menu_id) => {}
@@ -741,6 +751,13 @@ pub fn cleanup_prevent_sleep() {
 #[cfg(test)]
 mod tests {
     const SRC: &str = include_str!("actions.rs");
+
+    #[test]
+    fn sponsor_site_follows_the_current_language() {
+        assert_eq!(super::sponsor_site_url("zh-CN"), "https://www.alkaidlab.cn/#sponsors");
+        assert_eq!(super::sponsor_site_url("zh-TW"), "https://www.alkaidlab.cn/#sponsors");
+        assert_eq!(super::sponsor_site_url("en"), "https://www.alkaidlab.com/en/#sponsors");
+    }
 
     /// The body of a function of this file (from its signature to the next top-level item).
     fn body_of<'a>(name: &str) -> &'a str {
