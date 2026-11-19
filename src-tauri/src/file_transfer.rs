@@ -1,20 +1,34 @@
-use log::{info, warn};
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+//! Files offered to streaming clients through the clipboard (kind 4).
+//!
+//! Copying files in Explorer (or "send to Sunshine client" on a file) hands
+//! their paths to Sunshine (`POST /api/v1/file-transfer/offers`). Sunshine
+//! lists them as the logged-on user and returns the offer: an id and the
+//! relative paths and sizes. The offer goes to the clients as a clipboard
+//! frame; a client that supports it puts the files on its own clipboard and
+//! fetches each one from Sunshine when the user pastes. Nothing is copied
+//! ahead of a paste.
+
+use log::{debug, info, warn};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::clipboard;
 use crate::sunshine::{create_https_client, get_active_sessions, get_sunshine_url};
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct FileOffer {
-    id: String,
-    name: String,
-    size: u64,
-    mime: String,
-    download_url: String,
-    expires_in: u64,
-    #[serde(rename = "type")]
-    offer_type: String,
+/// Offer copied files to clients. Mirrors `DesktopSettings::clipboard_files_enabled`.
+static ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Explorer can raise more than one clipboard change for one copy.
+const REPEAT_WINDOW: Duration = Duration::from_secs(2);
+static LAST_OFFERED: Mutex<Option<(Vec<String>, Instant)>> = Mutex::new(None);
+
+pub fn set_enabled(enabled: bool) {
+    ENABLED.store(enabled, Ordering::Release);
+}
+
+pub fn is_enabled() -> bool {
+    ENABLED.load(Ordering::Acquire)
 }
 
 pub fn parse_send_to_client_args(args: &[String]) -> Vec<String> {
@@ -50,68 +64,86 @@ pub fn dispatch_cli_send(paths: Vec<String>) {
     }
 
     tauri::async_runtime::spawn(async move {
-        match send_paths_to_client(paths).await {
+        match offer_paths(paths, "send").await {
             Ok(msg) => info!("file transfer: {msg}"),
             Err(e) => warn!("file transfer failed: {e}"),
         }
     });
 }
 
-#[tauri::command]
-pub async fn send_file_to_client(path: String) -> Result<String, String> {
-    send_paths_to_client(vec![path]).await
+/// The local clipboard now holds these files (an Explorer copy). Called from
+/// the clipboard watcher; returns at once and offers them in the background.
+pub fn offer_copied_files(paths: Vec<String>) {
+    if !is_enabled() || paths.is_empty() {
+        return;
+    }
+    {
+        let mut last = LAST_OFFERED.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((previous, at)) = last.as_ref() {
+            if *previous == paths && at.elapsed() < REPEAT_WINDOW {
+                return;
+            }
+        }
+        *last = Some((paths.clone(), Instant::now()));
+    }
+
+    tauri::async_runtime::spawn(async move {
+        match offer_paths(paths, "clipboard").await {
+            Ok(msg) => debug!("file transfer: {msg}"),
+            Err(e) => debug!("file transfer: copied files not offered: {e}"),
+        }
+    });
 }
 
-async fn send_paths_to_client(paths: Vec<String>) -> Result<String, String> {
-    let first = paths.first().ok_or_else(|| "没有选择文件".to_string())?;
+#[tauri::command]
+pub async fn send_file_to_client(path: String) -> Result<String, String> {
+    offer_paths(vec![path], "send").await
+}
 
-    if paths.len() > 1 {
-        return Err("当前版本仅支持一次发送一个文件".to_string());
+async fn offer_paths(paths: Vec<String>, offer_type: &str) -> Result<String, String> {
+    if !is_enabled() {
+        return Err("复制文件到客户端已关闭".to_string());
     }
 
     let active_sessions = get_active_sessions()
         .await
         .map_err(|e| format!("无法查询客户端连接状态: {e}"))?;
-
     let running_sessions = active_sessions
         .iter()
         .filter(|s| s.state.eq_ignore_ascii_case("RUNNING"))
         .count();
-
     if running_sessions == 0 {
         return Err("没有正在串流的客户端连接".to_string());
     }
 
-    let path = canonicalize_file(first)?;
-    let offer = register_offer(&path).await?;
-    let payload = build_client_offer_payload(&offer)?;
+    let offer = register_offer(&paths, offer_type).await?;
+    let entries = offer
+        .get("files")
+        .and_then(|f| f.as_array())
+        .map(|f| f.len())
+        .unwrap_or(0);
+    let total = offer.get("total_size").and_then(|t| t.as_u64()).unwrap_or(0);
+    let payload = serde_json::to_vec(&offer).map_err(|e| format!("编码文件 offer 失败: {e}"))?;
     clipboard::post_file_offer_payload(payload)
         .await
         .map_err(|e| format!("发送文件 offer 失败: {e}"))?;
 
     Ok(format!(
-        "已发送文件 offer: {} ({} bytes, {} 个客户端)",
-        offer.name, offer.size, running_sessions
+        "已发送文件 offer: {} 项 ({} bytes, {} 个客户端)",
+        entries, total, running_sessions
     ))
 }
 
-fn canonicalize_file(path: &str) -> Result<PathBuf, String> {
-    let raw = PathBuf::from(path);
-    let canonical = std::fs::canonicalize(&raw)
-        .map_err(|e| format!("文件不存在或无法访问: {} ({e})", raw.display()))?;
-    if !canonical.is_file() {
-        return Err("当前版本仅支持发送单个文件".to_string());
-    }
-    Ok(canonical)
-}
-
-async fn register_offer(path: &PathBuf) -> Result<FileOffer, String> {
+/// Register the paths with Sunshine; returns its offer JSON unchanged, which
+/// is what the clients receive.
+async fn register_offer(paths: &[String], offer_type: &str) -> Result<serde_json::Value, String> {
     let url = get_sunshine_url().await?;
     let client = create_https_client()?;
     let endpoint = format!("{}/api/v1/file-transfer/offers", url.trim_end_matches('/'));
 
     let body = serde_json::json!({
-        "path": path.to_string_lossy(),
+        "paths": paths,
+        "type": offer_type,
     });
 
     let resp = client
@@ -127,10 +159,40 @@ async fn register_offer(path: &PathBuf) -> Result<FileOffer, String> {
         return Err(format!("注册文件 offer 失败: HTTP {status} {text}"));
     }
 
-    serde_json::from_str::<FileOffer>(&text)
-        .map_err(|e| format!("解析文件 offer 响应失败: {e}; body={text}"))
+    let offer: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("解析文件 offer 响应失败: {e}; body={text}"))?;
+    if offer.get("id").and_then(|v| v.as_str()).is_none()
+        || offer.get("files").and_then(|v| v.as_array()).is_none()
+    {
+        return Err(format!("文件 offer 响应缺少 id 或 files: {text}"));
+    }
+    Ok(offer)
 }
 
-fn build_client_offer_payload(offer: &FileOffer) -> Result<Vec<u8>, String> {
-    serde_json::to_vec(offer).map_err(|e| format!("编码文件 offer 失败: {e}"))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn send_to_client_args_take_everything_after_the_flag() {
+        let args: Vec<String> = ["gui.exe", "--send-to-client", "C:\\a b.txt", "D:\\c"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(parse_send_to_client_args(&args), vec!["C:\\a b.txt", "D:\\c"]);
+
+        let eq: Vec<String> = ["gui.exe", "--send-to-client=C:\\x"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(parse_send_to_client_args(&eq), vec!["C:\\x"]);
+    }
+
+    #[test]
+    fn disabled_offers_nothing() {
+        set_enabled(false);
+        offer_copied_files(vec!["C:\\a.txt".to_string()]);
+        assert!(LAST_OFFERED.lock().unwrap().is_none());
+        set_enabled(true);
+    }
 }

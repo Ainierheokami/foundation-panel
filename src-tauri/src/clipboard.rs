@@ -475,7 +475,10 @@ fn snapshot_and_post(echo: &Arc<Mutex<EchoState>>) {
     if let Ok(files) = ctx.get_files() {
         if !files.is_empty() && text_bytes.is_none() && png_bytes.is_none() {
             st.current = None;
-            debug!("local file clipboard without transferable payload; sync skipped");
+            // The names never travel as text; the files themselves are offered
+            // for pasting through the file-transfer endpoints (kind 4).
+            debug!("local file clipboard: offering {} path(s) as files", files.len());
+            crate::file_transfer::offer_copied_files(files);
             return;
         }
     }

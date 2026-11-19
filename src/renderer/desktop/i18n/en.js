@@ -276,6 +276,8 @@ export const en = {
     devMode: 'Developer Mode',
     devModeDesc: 'Show debug information and developer tools',
     textContextEnabled: 'Windows text focus and on-screen keyboard assistance',
+    clipboardFilesEnabled: 'Copy files to streaming clients',
+    clipboardFilesEnabledDesc: 'Files and folders copied on the host can be pasted in the streaming client\'s file manager, and files get a "Send to Sunshine client" context menu entry. Files travel only when pasted, and only files you can read are offered. Needs a client that supports it (Moonlight for Windows for now).',
     textContextEnabledDesc: 'Detect focused editable controls during streaming to support the on-screen keyboard and caret positioning. Disable this optional observer if it affects system performance. Ordinary remote keyboard input is unchanged.',
     logLevel: 'Log Level',
     logLevelDesc: 'Set the verbosity of logging',
