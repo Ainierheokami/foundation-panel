@@ -477,7 +477,7 @@ fn snapshot_and_post(echo: &Arc<Mutex<EchoState>>) {
             st.current = None;
             // The names never travel as text; the files themselves are offered
             // for pasting through the file-transfer endpoints (kind 4).
-            debug!("local file clipboard: offering {} path(s) as files", files.len());
+            info!("local file clipboard: offering {} path(s) as files", files.len());
             crate::file_transfer::offer_copied_files(files);
             return;
         }

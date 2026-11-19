@@ -58,6 +58,8 @@ pub fn parse_send_to_client_args(args: &[String]) -> Vec<String> {
     out
 }
 
+const NO_RUNNING_SESSION: &str = "没有正在串流的客户端连接";
+
 pub fn dispatch_cli_send(paths: Vec<String>) {
     if paths.is_empty() {
         return;
@@ -89,8 +91,12 @@ pub fn offer_copied_files(paths: Vec<String>) {
 
     tauri::async_runtime::spawn(async move {
         match offer_paths(paths, "clipboard").await {
-            Ok(msg) => debug!("file transfer: {msg}"),
-            Err(e) => debug!("file transfer: copied files not offered: {e}"),
+            Ok(msg) => info!("file transfer: {msg}"),
+            // Copying files with no stream running is the normal case.
+            Err(e) if e == NO_RUNNING_SESSION => {
+                debug!("file transfer: copied files not offered: {e}")
+            }
+            Err(e) => warn!("file transfer: copied files not offered: {e}"),
         }
     });
 }
@@ -113,7 +119,7 @@ async fn offer_paths(paths: Vec<String>, offer_type: &str) -> Result<String, Str
         .filter(|s| s.state.eq_ignore_ascii_case("RUNNING"))
         .count();
     if running_sessions == 0 {
-        return Err("没有正在串流的客户端连接".to_string());
+        return Err(NO_RUNNING_SESSION.to_string());
     }
 
     let offer = register_offer(&paths, offer_type).await?;
