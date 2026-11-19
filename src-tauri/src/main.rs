@@ -1,10 +1,17 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// `#[implement]` (client_files_win) expands to paths under `windows_core`.
+#[cfg(target_os = "windows")]
+extern crate wv2_windows_core as windows_core;
+
 mod app;
 mod bat_runner;
 mod build_identity;
 mod component_inventory;
+mod client_files;
+#[cfg(target_os = "windows")]
+mod client_files_win;
 mod client_fingerprint_rules;
 mod clipboard;
 mod clipboard_health;
