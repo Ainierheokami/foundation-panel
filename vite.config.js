@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { resolve, join } from 'path'
 import vuePlugin from '@vitejs/plugin-vue'
 import { defineConfig } from 'vite'
@@ -7,8 +7,21 @@ import { dirname } from 'node:path'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
-// dev-env-npm: preserve source aliases inside the integrity-locked package.
-const foundationUi = resolve(dirname(fileURLToPath(import.meta.resolve('foundation-ui'))), '..')
+// An explicit override supports local shared-UI development; otherwise use
+// the integrity-locked package even when a sibling checkout exists.
+const foundationUi = resolve(process.env.FOUNDATION_UI_DIR ||
+  resolve(dirname(fileURLToPath(import.meta.resolve('foundation-ui'))), '..'))
+const uiExports = JSON.parse(readFileSync(join(foundationUi, 'package.json'), 'utf8')).exports || {}
+const escapePattern = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const uiAliases = Object.entries(uiExports).filter(([, target]) => typeof target === 'string').map(([key, target]) => {
+  const name = key === '.' ? 'foundation-ui' : `foundation-ui/${key.slice(2)}`
+  const [before, after] = name.split('*')
+  return {
+    find: new RegExp(`^${escapePattern(before)}${after === undefined ? '' : `(.+)${escapePattern(after)}`}$`),
+    replacement: resolve(foundationUi, target.replace('*', '$1')),
+  }
+})
+console.info(`[foundation-ui] ${foundationUi}`)
 
 const rendererSrcPath = join(__dirname, 'src', 'renderer')
 // The settings data (the search index of the settings and the label tables) belongs to the product this panel is built into, Foundation Sunshine (GPL-3.0): it is
@@ -24,6 +37,7 @@ export default defineConfig(() => ({
   root: rendererSrcPath,
   publicDir: 'public',
   server: {
+    fs: { allow: [__dirname, foundationUi] },
     port: 8080,
     strictPort: true,
     host: '127.0.0.1',
@@ -62,11 +76,10 @@ export default defineConfig(() => ({
     vuePlugin({ template: { compilerOptions: { isCustomElement: (tag) => tag.startsWith('md-') } } }),
   ],
   resolve: {
-    // dev-env-npm: aliases use the locked package; Vue stays a single copy.
+    // Resolve every shared module from the same source; Vue stays a single copy.
     dedupe: ['vue'],
     alias: [
-      { find: /^foundation-ui\/vue$/, replacement: join(foundationUi, 'src/vue/index.js') },
-      { find: /^foundation-ui\/all\.css$/, replacement: join(foundationUi, 'src/css/all.css') },
+      ...uiAliases,
       { find: /^foundation-ui\/(.*)$/, replacement: join(foundationUi, 'src/$1') },
       // every call to the host goes through this import: the timed one (src/renderer/tauri-core-timed.js) gives the package back with a timed invoke
       { find: /^@tauri-apps\/api\/core$/, replacement: join(rendererSrcPath, 'tauri-core-timed.js') },
