@@ -40,6 +40,10 @@ pub fn setup_application(app: &mut App) -> Result<(), Box<dyn std::error::Error>
         app.handle().exit(0);
         return Ok(());
     }
+    // Recover an interrupted user-session transaction even if WebView2 is
+    // unavailable. The guard also covers a later setup error.
+    #[cfg(target_os = "windows")]
+    let touch_keyboard_guard = crate::touch_keyboard::start();
     let agent_only = args.iter().any(|arg| arg == "--hidden");
     let explicit_minimized = args.iter().any(|arg| arg == "--minimized");
     // `--start-guide` is the installer's "open the start guide" button. It shows the main window
@@ -62,6 +66,10 @@ pub fn setup_application(app: &mut App) -> Result<(), Box<dyn std::error::Error>
     let app_handle = app.handle().clone();
     if !crate::webview_runtime::ensure_available() {
         info!("WebView2 Runtime is unavailable; native fallback was shown");
+        // process::exit skips destructors; wait for the recovery worker before
+        // leaving this early-exit path.
+        #[cfg(target_os = "windows")]
+        drop(touch_keyboard_guard);
         std::process::exit(crate::webview_runtime::WEBVIEW2_MISSING_EXIT_CODE);
     }
     windows::register_agent_restart();
@@ -185,12 +193,16 @@ pub fn setup_application(app: &mut App) -> Result<(), Box<dyn std::error::Error>
             let _ = crate::vigem::get_vigem_status().await;
         }));
     }
+    #[cfg(target_os = "windows")]
+    app.manage(touch_keyboard_guard);
     app.manage(tasks);
 
     Ok(())
 }
 
 pub fn shutdown_application(app: &AppHandle) {
+    #[cfg(target_os = "windows")]
+    crate::touch_keyboard::stop();
     if let Some(tasks) = app.try_state::<BackgroundTasks>() {
         tasks.abort();
     }

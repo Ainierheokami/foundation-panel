@@ -522,6 +522,12 @@ pub struct TrayClientSession {
     pub highly_suspected_unknown_client: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub struct TrayTouchKeyboard {
+    pub enabled: bool,
+    pub session_id: u32,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
 pub struct TrayVddState {
     #[serde(default)]
@@ -590,6 +596,8 @@ pub struct TrayState {
     pub pairing_client_name: String,
     #[serde(default)]
     pub sessions: Vec<TrayClientSession>,
+    #[serde(default)]
+    pub touch_keyboard: Option<TrayTouchKeyboard>,
     #[serde(default)]
     pub revision: u64,
     #[serde(default)]
@@ -722,6 +730,44 @@ mod tray_protocol_tests {
             capabilities: vec!["state-v1".to_string(), "actions-v1".to_string()],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn reads_optional_touch_keyboard_without_breaking_older_hosts() {
+        let prefix = format!(
+            r#"{{"protocol_version":{TRAY_PROTOCOL_VERSION},"instance_id":"core","owner":"gui","capabilities":["state-v1","touch-keyboard-v1"]"#
+        );
+        let enabled = parse_tray_state_json(&format!(
+            r#"{prefix},"touch_keyboard":{{"enabled":true,"session_id":42}}}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            enabled.touch_keyboard,
+            Some(TrayTouchKeyboard {
+                enabled: true,
+                session_id: 42
+            })
+        );
+        let disabled = parse_tray_state_json(&format!(
+            r#"{prefix},"touch_keyboard":{{"enabled":false,"session_id":42}}}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            disabled.touch_keyboard,
+            Some(TrayTouchKeyboard {
+                enabled: false,
+                session_id: 42
+            })
+        );
+        let cleared =
+            parse_tray_state_json(&format!(r#"{prefix},"touch_keyboard":null}}"#)).unwrap();
+        assert_eq!(cleared.touch_keyboard, None);
+        let old = parse_tray_state_json(&format!(r#"{prefix}}}"#)).unwrap();
+        assert_eq!(old.touch_keyboard, None);
+        assert!(
+            parse_tray_state_json(&format!(r#"{prefix},"touch_keyboard":{{"enabled":true}}}}"#))
+                .is_err()
+        );
     }
 
     #[test]
