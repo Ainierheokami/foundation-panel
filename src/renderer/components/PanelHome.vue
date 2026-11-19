@@ -9,7 +9,7 @@ import { usePanelHome, seen, SETTLE_CAP_MS } from '../composables/usePanelHome.j
 import { useHostReach } from '../composables/useHostReach.js'
 import { useDriverGuard } from '../composables/useDriverGuard.js'
 import { useGamepadType } from '../composables/useGamepadType.js'
-import { SPONSORS } from '../config/sponsors.js'
+import { SPONSORS, sponsorUrl } from '../config/sponsors.js'
 import { openExternalUrl, sunshine, vdd as vddApi, virtualMicrophone } from '../tauri-adapter.js'
 import { hostBase, hostFetch } from '../composables/hostBase.js'
 import { useI18n } from '../desktop/i18n/index.js'
@@ -215,7 +215,7 @@ function onAction(a) {
     case 'detail-external': emit('open', 'check-update'); break
     case 'open-url': openExternalUrl(a.value); break
     case 'open-desktop': void openBigScreenWithNotice((m) => notify.snack(m), t.value.sidebar.openBigScreenFailed); break
-    case 'pair-qr-begin': pairQr.begin(); break
+    case 'pair-qr-begin': pairQr.begin(a.value === true); break
     case 'pair-qr-stop': pairQr.stop(); break
     case 'table-row': onTableRow(a.value); break
     case 'app': emit('open', 'apps'); break
@@ -229,7 +229,7 @@ function onAction(a) {
     case 'setting': saveSetting(a.value); break
     case 'runtime-bitrate': runtimeBitrate(a.value); break
     case 'ds5-tune': ds5Tune(a.value); break
-    case 'sponsor': { const target = SPONSORS.find((x) => x.id === a.value); if (a.value === 'star') openExternalUrl('https://github.com/AlkaidLab/foundation-sunshine'); else if (target) openExternalUrl(target.url); else sponsorOpen.value = true; break }
+    case 'sponsor': { const target = SPONSORS.find((x) => x.id === a.value); if (a.value === 'star') openExternalUrl('https://github.com/AlkaidLab/foundation-sunshine'); else if (target) openExternalUrl(sponsorUrl(target, locale.value)); else sponsorOpen.value = true; break }
     default: break
   }
 }
@@ -240,6 +240,7 @@ const hostApi = {
 }
 // the QR code of the pairing card: a pairing window is open on the host only while the card shows it (the card asks and gives it back)
 const pairQr = createPairQr({
+  autoRenew: false,
   start: async () => { const d = await hostApi.postJson('/api/qr-pair', {}); if (String(d.status) !== 'true') throw new Error(d.error || 'qr'); return d },
   poll: () => hostApi.getJson('/api/qr-pair'),
   cancel: () => hostApi.postJson('/api/qr-pair/cancel', {}),
@@ -286,7 +287,7 @@ const onTableRow = (row) => { if (row.tab === 'errors' || row.tab === 'sessions'
 const onLink = (to) => emit('open', to)
 
 const supportSections = computed(() => [
-  { title: h.value.sponsorTitle, items: SPONSORS.map((s) => ({ id: s.id, icon: 'favorite', title: s.label, url: s.url })) },
+  { title: h.value.sponsorTitle, items: SPONSORS.map((s) => ({ id: s.id, icon: 'favorite', title: s.label, url: sponsorUrl(s, locale.value) })) },
   { items: [
     { id: 'star', icon: 'star', title: h.value.star, url: 'https://github.com/AlkaidLab/foundation-sunshine' },
     { id: 'qq', icon: 'groups', title: h.value.qq, url: 'https://qm.qq.com/q/AfMQoyKrkc' },
