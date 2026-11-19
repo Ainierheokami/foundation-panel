@@ -105,12 +105,24 @@ pub(crate) fn start() -> Guard {
     match std::thread::Builder::new()
         .name("touch-keyboard".into())
         .spawn(move || {
-            let journal = match FileJournal::new() {
-                Ok(journal) => journal,
-                Err(error) => {
-                    log::warn!("touch keyboard journal directory is unavailable: {error}");
+            let mut mode = None;
+            let mut init_backoff = RETRY_INITIAL;
+            let journal = loop {
+                match FileJournal::new() {
+                    Ok(journal) => break journal,
+                    Err(error) => {
+                        log::warn!("touch keyboard journal directory is unavailable: {error}");
+                    }
+                }
+                match receiver.recv_timeout(init_backoff) {
+                    Ok(Command::Update(next)) => mode = next,
+                    Ok(Command::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                if worker_stopping.load(Ordering::Acquire) {
                     return;
                 }
+                init_backoff = (init_backoff * 2).min(RETRY_MAX);
             };
             let mut transaction =
                 Transaction::new(UserRegistry::default(), journal, WnfNotification::default());
@@ -121,7 +133,10 @@ pub(crate) fn start() -> Guard {
                     Some(RETRY_INITIAL)
                 }
             };
-            let mut mode = None;
+            // Apply updates that arrived while resolving the journal path.
+            if mode.is_some() {
+                retry = Some(Duration::ZERO);
+            }
             let mut backoff = RETRY_INITIAL;
             loop {
                 let command = if let Some(delay) = retry.take() {

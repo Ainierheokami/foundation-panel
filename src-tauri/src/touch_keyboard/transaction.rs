@@ -107,7 +107,6 @@ fn notification_target(enabled: bool) -> u32 {
 struct ParsedJournal {
     snapshot: Snapshot,
     intents: Vec<usize>,
-    incomplete_tail: bool,
 }
 
 fn parse_journal(bytes: &[u8]) -> io::Result<ParsedJournal> {
@@ -176,11 +175,7 @@ fn parse_journal(bytes: &[u8]) -> io::Result<ParsedJournal> {
             intents.push(intent.index);
         }
     }
-    Ok(ParsedJournal {
-        snapshot,
-        intents,
-        incomplete_tail,
-    })
+    Ok(ParsedJournal { snapshot, intents })
 }
 
 fn line(value: &impl Serialize) -> io::Result<Vec<u8>> {
@@ -324,6 +319,7 @@ impl<R: Registry, J: Journal, N: Notification> Transaction<R, J, N> {
         self.journal.create(&snapshot_line)?;
         self.owns_journal = true;
 
+        let mut registry_written = false;
         for (index, entry) in snapshot.values.iter().enumerate() {
             let Some(target) = desired(&snapshot, index) else {
                 continue;
@@ -341,8 +337,11 @@ impl<R: Registry, J: Journal, N: Notification> Transaction<R, J, N> {
             // This makes a partially applied snapshot recoverable after a crash.
             self.journal.append(&line(&Intent { index })?)?;
             self.registry.set(&entry.name, &target)?;
+            registry_written = true;
         }
-        self.registry.flush()?;
+        if registry_written {
+            self.registry.flush()?;
+        }
         if self.notification.read(session_id)? != notification_original {
             return Err(io::Error::other(
                 "touch keyboard notification changed before publish",
@@ -393,12 +392,10 @@ impl<R: Registry, J: Journal, N: Notification> Transaction<R, J, N> {
                 continue;
             }
             if current != target {
-                first_error.get_or_insert_with(|| {
-                    io::Error::other(format!(
-                        "touch keyboard value changed externally: {}",
-                        entry.name
-                    ))
-                });
+                log::warn!(
+                    "preserving externally changed touch keyboard value: {}",
+                    entry.name
+                );
                 continue;
             }
             let result = match &entry.original {
@@ -411,7 +408,11 @@ impl<R: Registry, J: Journal, N: Notification> Transaction<R, J, N> {
         }
         // Flush even when all values already look restored: an earlier restore
         // may have written them successfully but failed its flush.
-        if !parsed.intents.is_empty() {
+        if parsed
+            .intents
+            .iter()
+            .any(|index| *index != NOTIFICATION_INDEX)
+        {
             if let Err(error) = self.registry.flush() {
                 first_error.get_or_insert(error);
             }
@@ -428,19 +429,14 @@ impl<R: Registry, J: Journal, N: Notification> Transaction<R, J, N> {
             let current = self.notification.read(session_id)?;
             if current != original {
                 if current != notification_target(parsed.snapshot.enabled) {
-                    return Err(io::Error::other(
-                        "touch keyboard notification changed externally",
-                    ));
+                    log::warn!("preserving externally changed touch keyboard notification");
+                } else {
+                    // Keep the journal if either publication or verification fails.
+                    self.publish_verified(session_id, original)?;
                 }
-                // Keep the journal if either publication or verification fails.
-                self.publish_verified(session_id, original)?;
             }
         }
-        if parsed.incomplete_tail {
-            // An incomplete intent could not have passed sync. Restore the
-            // complete prefix (including WNF), but keep the damaged journal.
-            return Err(invalid("touch keyboard journal has an incomplete intent"));
-        }
+        // An incomplete intent cannot have passed sync before its write.
         self.journal.remove()?;
         self.owns_journal = false;
         Ok(())

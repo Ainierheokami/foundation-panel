@@ -349,11 +349,10 @@ fn a_reconnected_same_mode_does_not_skip_a_partially_failed_restore() {
 }
 
 #[test]
-fn externally_changed_value_is_never_overwritten_and_journal_is_kept() {
+fn externally_changed_value_is_preserved_while_notification_is_restored() {
     let shared = fixture();
-    let original = shared.borrow().values.clone();
     let mut tx = transaction(&shared);
-    tx.reconcile(Some(true), 11).unwrap();
+    tx.reconcile(Some(false), 11).unwrap();
     let external = RawValue {
         kind: 3,
         bytes: vec![4, 5, 6],
@@ -362,15 +361,9 @@ fn externally_changed_value_is_never_overwritten_and_journal_is_kept() {
         .borrow_mut()
         .values
         .insert(KEYS[0].name.into(), external.clone());
-    assert!(tx.reconcile(None, 11).is_err());
-    assert_eq!(shared.borrow().values.get(KEYS[0].name), Some(&external));
-    assert!(shared.borrow().journal.is_some());
-    shared
-        .borrow_mut()
-        .values
-        .insert(KEYS[0].name.into(), original[KEYS[0].name].clone());
     tx.reconcile(None, 11).unwrap();
-    assert_eq!(shared.borrow().values, original);
+    assert_eq!(shared.borrow().values.get(KEYS[0].name), Some(&external));
+    assert_eq!(shared.borrow().notification_value, 2);
     assert!(shared.borrow().journal.is_none());
 }
 
@@ -434,10 +427,12 @@ fn registry_already_matching_does_not_skip_the_live_notification() {
     let mut tx = transaction(&shared);
     tx.reconcile(Some(false), 11).unwrap();
     assert_eq!(shared.borrow().writes, 0);
+    assert_eq!(shared.borrow().flushes, 0);
     assert_eq!(shared.borrow().notification_value, 0);
     tx.reconcile(None, 11).unwrap();
     assert_eq!(shared.borrow().notification_value, 2);
     assert_eq!(shared.borrow().values, original);
+    assert_eq!(shared.borrow().flushes, 0);
 }
 
 #[test]
@@ -543,9 +538,9 @@ fn externally_changed_live_preference_is_preserved_on_restore() {
     let mut tx = transaction(&shared);
     tx.reconcile(Some(false), 11).unwrap();
     shared.borrow_mut().notification_value = 1;
-    assert!(tx.reconcile(None, 11).is_err());
+    tx.reconcile(None, 11).unwrap();
     assert_eq!(shared.borrow().notification_value, 1);
-    assert!(shared.borrow().journal.is_some());
+    assert!(shared.borrow().journal.is_none());
 }
 
 #[test]
@@ -562,8 +557,8 @@ fn damaged_tail_does_not_prevent_restoring_a_completed_notification_intent() {
             .unwrap()
             .extend_from_slice(b"{\"index\":");
     }
-    assert!(transaction(&shared).recover_on_start().is_err());
+    transaction(&shared).recover_on_start().unwrap();
     assert_eq!(shared.borrow().values, original);
     assert_eq!(shared.borrow().notification_value, 2);
-    assert!(shared.borrow().journal.is_some());
+    assert!(shared.borrow().journal.is_none());
 }
