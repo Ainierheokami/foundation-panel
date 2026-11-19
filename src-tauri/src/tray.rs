@@ -1400,6 +1400,25 @@ pub fn tray_prefs_get() -> crate::tray_prefs::TrayPrefs {
     crate::tray_prefs::current()
 }
 
+/// 恢复 Panel 默认偏好: the window's settings file, the pet shortcut, the tray icon's record and the developer overrides go back to their defaults (the page then clears what the window itself stores and loads again).
+#[tauri::command]
+pub async fn reset_panel_preferences(app: AppHandle) -> Result<(), String> {
+    // every part is tried, so that one that fails does not leave the others as they were; the page says that the reset is not complete
+    let mut failed: Vec<String> = Vec::new();
+    if let Err(error) = crate::dev_tools::dev_reset_desktop_settings(app.clone()).await {
+        failed.push(error);
+    }
+    if let Err(error) = crate::desktop_settings::reset_toolbar_shortcut(&app) {
+        failed.push(error);
+    }
+    if let Err(error) = crate::tray_prefs::save(crate::tray_prefs::TrayPrefs::default()) {
+        failed.push(error);
+    }
+    popup_input::reset_failures();
+    refresh_menu_mode(&app);
+    if failed.is_empty() { Ok(()) } else { Err(failed.join("; ")) }
+}
+
 #[tauri::command]
 pub fn tray_prefs_set(app: AppHandle, prefs: crate::tray_prefs::TrayPrefs) -> Result<crate::tray_prefs::TrayPrefs, String> {
     // the layout of the quick panel is written only by tray_layout_set / tray_popup_layout: a page opened before an edit in the menu must not put the old layout back
