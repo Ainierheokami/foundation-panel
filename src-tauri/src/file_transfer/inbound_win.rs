@@ -21,7 +21,7 @@ use windows::Win32::Foundation::{
     CLIPBRD_E_CANT_OPEN, DATA_S_SAMEFORMATETC, DV_E_DVASPECT, DV_E_FORMATETC, DV_E_LINDEX,
     DV_E_TYMED, E_INVALIDARG, E_NOTIMPL, E_OUTOFMEMORY, FILETIME, HGLOBAL, LPARAM,
     OLE_E_ADVISENOTSUPPORTED, STG_E_ACCESSDENIED, STG_E_INVALIDFUNCTION, STG_E_INVALIDPOINTER,
-    STG_E_READFAULT, S_FALSE, S_OK, WPARAM,
+    STG_E_READFAULT, STG_E_WRITEFAULT, S_FALSE, S_OK, WPARAM,
 };
 use windows::Win32::System::Com::{
     CoTaskMemAlloc, IAdviseSink, IBindCtx, IDataObject, IDataObject_Impl, IEnumFORMATETC,
@@ -270,18 +270,16 @@ impl IStream_Impl for FileStream_Impl {
         plibnewposition: *mut u64,
     ) -> windows::core::Result<()> {
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let base = match dworigin {
-            STREAM_SEEK_SET => 0i128,
-            STREAM_SEEK_CUR => st.position as i128,
-            STREAM_SEEK_END => self.size as i128,
+        let target = match dworigin {
+            // An absolute position is unsigned.
+            STREAM_SEEK_SET => Some(dlibmove as u64),
+            STREAM_SEEK_CUR => st.position.checked_add_signed(dlibmove),
+            STREAM_SEEK_END => self.size.checked_add_signed(dlibmove),
             _ => return Err(STG_E_INVALIDFUNCTION.into()),
         };
-        let target = base + dlibmove as i128;
-        if target < 0 {
-            return Err(STG_E_INVALIDFUNCTION.into());
-        }
-        // Positions past the end are legal; reads there return nothing.
-        st.position = (target as u128).min(self.size as u128) as u64;
+        // Before the start or past 2^64: refused. Past the end is a position like
+        // any other (reads there return nothing), kept as asked.
+        st.position = target.ok_or_else(|| windows::core::Error::from(STG_E_INVALIDFUNCTION))?;
         if !plibnewposition.is_null() {
             unsafe { *plibnewposition = st.position };
         }
@@ -313,11 +311,12 @@ impl IStream_Impl for FileStream_Impl {
                     target.Write(buffer.as_ptr() as *const _, got as u32, Some(&mut put))
                 };
                 written += put as u64;
+                // On success the counts must match: a short write is a write fault.
                 if wr.is_err() || put as usize != got {
                     result = Err(if wr.is_err() {
                         wr.into()
                     } else {
-                        STG_E_ACCESSDENIED.into()
+                        STG_E_WRITEFAULT.into()
                     });
                     break;
                 }
@@ -826,6 +825,28 @@ mod tests {
             let mut stat = STATSTG::default();
             stream.Stat(&mut stat, STATFLAG_NONAME).expect("Stat");
             assert_eq!(stat.cbSize, 11);
+            // Past the end is a position like any other; overflow and before-the-start are refused.
+            let mut pos = 0u64;
+            stream
+                .Seek(20, STREAM_SEEK_SET, Some(&mut pos))
+                .expect("past the end");
+            assert_eq!(pos, 20);
+            stream
+                .Seek(-10, STREAM_SEEK_CUR, Some(&mut pos))
+                .expect("back from past the end");
+            assert_eq!(pos, 10);
+            stream
+                .Seek(-1, STREAM_SEEK_SET, Some(&mut pos))
+                .expect("an absolute position is unsigned");
+            assert_eq!(pos, u64::MAX);
+            assert!(
+                stream.Seek(1, STREAM_SEEK_CUR, Some(&mut pos)).is_err(),
+                "overflow"
+            );
+            assert!(
+                stream.Seek(-12, STREAM_SEEK_END, Some(&mut pos)).is_err(),
+                "before the start"
+            );
             drop(stream);
             ReleaseStgMedium(&mut medium);
             drop(clip);

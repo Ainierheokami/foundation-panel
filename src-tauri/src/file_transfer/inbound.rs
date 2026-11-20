@@ -37,9 +37,36 @@ pub struct ClientOffer {
     pub total_size: u64,
 }
 
-const RESERVED: [&str; 22] = [
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+/// Device names Windows reserves whatever the extension, COM and LPT with a superscript digit included.
+const RESERVED: [&str; 28] = [
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "COM1",
+    "COM2",
+    "COM3",
+    "COM4",
+    "COM5",
+    "COM6",
+    "COM7",
+    "COM8",
+    "COM9",
+    "LPT1",
+    "LPT2",
+    "LPT3",
+    "LPT4",
+    "LPT5",
+    "LPT6",
+    "LPT7",
+    "LPT8",
+    "LPT9",
+    "COM\u{b9}",
+    "COM\u{b2}",
+    "COM\u{b3}",
+    "LPT\u{b9}",
+    "LPT\u{b2}",
+    "LPT\u{b3}",
 ];
 
 fn valid_component(name: &str) -> bool {
@@ -280,6 +307,8 @@ mod tests {
         assert!(!parses(serde_json::json!([file("/a", 1.0)])));
         assert!(!parses(serde_json::json!([file("CON.txt", 1.0)])));
         assert!(!parses(serde_json::json!([file("lpt1", 1.0)])));
+        assert!(!parses(serde_json::json!([file("COM\u{b9}.txt", 1.0)])));
+        assert!(!parses(serde_json::json!([file("lpt\u{b3}", 1.0)])));
         assert!(!parses(serde_json::json!([file("a.", 1.0)])));
         assert!(!parses(serde_json::json!([file("a ", 1.0)])));
         assert!(!parses(serde_json::json!([file("d/a", 1.0)])));
